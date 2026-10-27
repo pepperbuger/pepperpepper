@@ -6,6 +6,7 @@ Ondo Perps에 지정가(post-only) 호가를 걸어 USDC 리워드와 포인트�
 
 | 파일 | 내용 |
 |---|---|
+| `OVERVIEW.md` | 개요: 무엇을, 왜 만드는지, 목표와 판단 기준 |
 | `docs/SPEC.md` | 설계서: 확인된 API 사실, 구조, 호가와 헷지 로직, 위험 관리, 측정, 구현 순서 |
 | `CLAUDE.md` | Claude Code가 이 폴더에서 지킬 규칙 (자동으로 읽힘) |
 | `config.example.yaml` | 설정 예시 |
