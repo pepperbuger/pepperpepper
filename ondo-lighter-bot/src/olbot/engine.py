@@ -62,6 +62,7 @@ class Engine:
         self.equity_now: Decimal | None = None
         self.ondo_margin_usage: float | None = None
         self.ws_bad_since: float | None = None
+        self.positions_ok_ts: float | None = None  # 마지막으로 양쪽 포지션 조회에 성공한 시각
         self.requests_sent = 0
         self.started = time.time()
 
@@ -132,6 +133,9 @@ class Engine:
         status = basis_status(bps, self.trackers[b].median(now), dev, self.cfg.quoting.basis_sanity_bps)
         return None if status == "ok" else status
 
+    def min_hedge_usd(self, b: str, mid: Decimal) -> Decimal:
+        return self.lighter_markets[b].min_hedge_size(mid) * mid
+
     def inventory(self, b: str) -> Decimal:
         return self.hedger.states[b].ondo_pos if self.hedger else Decimal(0)
 
@@ -162,6 +166,7 @@ class Engine:
         recent = {b for b, t in self.last_fill_ts.items() if now - t < FILL_SETTLE_SEC}
         self.hedger.set_ondo_positions(by_base, skip=recent)
         await self.hedger.refresh_lighter()
+        self.positions_ok_ts = time.time()
 
     async def update_equity(self) -> None:
         bal = await self.ondo_rest.balance()
@@ -313,18 +318,13 @@ class Engine:
                 mid = self.lighter_mid(b) or self.ondo_mid(b)
                 if mid is None:
                     continue
-                unhedged = self.hedger.unhedged_usd(b, mid)
-                min_usd = self.lighter_markets[b].min_hedge_size(mid) * mid
-                if unhedged >= min_usd:
-                    st.unhedged_since = st.unhedged_since or now
+                if self.hedger.unhedged_usd(b, mid) >= self.min_hedge_usd(b, mid):
                     try:
                         await self.hedger.hedge(b, self.lighter_mid(b))
                     except Exception:
                         # Hedger.hedge는 예외를 밖으로 내지 않게 만들었지만, 만약을 위해 루프는 절대 죽지 않게 한다
                         log.exception("%s 헷지 오류 (다음 대사에서 다시 시도)", b)
                         st.consecutive_failures += 1
-                else:
-                    st.unhedged_since = None
 
     async def risk_loop(self) -> None:
         while not self.stop.is_set():
@@ -346,6 +346,14 @@ class Engine:
             self.paused = f"시세 WS 이상 {silent:.0f}초" if silent > r.ws_stale_sec else None
             return
         mids = {b: self.lighter_mid(b) or self.ondo_mid(b) or Decimal(0) for b in self.bases}
+        # 노출 타이머는 대사 성공 여부와 상관없이 로컬 상태(체결 즉시 반영)로 매초 갱신한다.
+        # 포지션 조회가 계속 실패해도 체결로 생긴 노출은 여기서 잡혀 max_unhedged_sec 뒤 kill된다.
+        for b in self.bases:
+            st = self.hedger.states[b]
+            if mids[b] > 0 and self.hedger.unhedged_usd(b, mids[b]) >= self.min_hedge_usd(b, mids[b]):
+                st.unhedged_since = st.unhedged_since or now
+            else:
+                st.unhedged_since = None
         decision = evaluate(
             RiskInputs(
                 now=now,
@@ -357,8 +365,10 @@ class Engine:
                 equity_start=self.equity_start,
                 equity_now=self.equity_now,
                 ondo_margin_usage=self.ondo_margin_usage,
+                positions_stale_sec=now - (self.positions_ok_ts or now),
             ),
             r.max_unhedged_usd, r.max_unhedged_sec, r.ws_stale_sec, r.daily_loss_limit_usd, r.max_margin_usage,
+            r.positions_stale_sec,
         )
         if decision.kill_reason:
             await self.kill(decision.kill_reason)

@@ -17,6 +17,24 @@ from olbot.lighter.client import LighterMarket
 log = logging.getLogger("olbot.hedger")
 
 
+# 결과를 모르는 주문(응답 유실, 또는 접수됐는데 포지션 반영이 아직 없음)을 이 시간 동안은 체결된 것으로 본다.
+# 그동안 같은 마켓에 새 헷지 주문을 보내지 않는다. 지나도 포지션이 안 움직이면 미체결로 보고 다시 보낸다.
+PENDING_CONFIRM_SEC = 10.0
+
+DONE, FAILED, WAITING = "done", "failed", "waiting"
+
+
+@dataclass
+class PendingHedge:
+    size: Decimal
+    is_sell: bool
+    lighter_pos_before: Decimal
+    sent_ts: float
+
+    def expected_move(self) -> Decimal:
+        return -self.size if self.is_sell else self.size
+
+
 @dataclass
 class HedgeState:
     ondo_pos: Decimal = Decimal(0)
@@ -24,6 +42,7 @@ class HedgeState:
     unhedged_since: float | None = None
     consecutive_failures: int = 0
     last_attempt_ts: float = 0.0
+    pending: PendingHedge | None = None
 
     @property
     def delta(self) -> Decimal:
@@ -40,6 +59,12 @@ def hedge_order(delta: Decimal, m: LighterMarket, mid: Decimal, slippage_bps: fl
     slip = Decimal(str(slippage_bps)) / Decimal(10_000)
     worst = mid * (1 - slip) if is_sell else mid * (1 + slip)
     return size, is_sell, worst
+
+
+def pending_confirmed(p: PendingHedge, lighter_pos: Decimal) -> bool:
+    """포지션이 주문 방향으로 절반 이상 움직였으면 그 주문이 체결된 것으로 본다."""
+    moved = lighter_pos - p.lighter_pos_before
+    return moved * p.expected_move() > 0 and abs(moved) * 2 >= p.size
 
 
 @dataclass
@@ -72,56 +97,96 @@ class Hedger:
         return abs(self.states[base].delta) * mid
 
     async def hedge(self, base: str, lighter_mid: Decimal | None) -> None:
-        """한 마켓의 차이를 헷지한다. 실패하면 슬리피지를 넓혀 retries번 다시 시도한다.
+        """한 마켓의 차이를 헷지한다.
 
-        예외를 밖으로 내보내지 않는다. 헷지가 실패하면 consecutive_failures를 올리고,
-        이 값이 위험 판단(kill)과 다음 대사의 재시도를 이끈다. kill 뒤에도 헷지는 계속되어야 해서다.
+        예외를 밖으로 내보내지 않는다. 결과가 확실히 실패면 consecutive_failures를 올리고(3이면 kill),
+        결과를 아직 모르는 주문이 있으면(WAITING) 아무것도 보내지 않고 다음 대사를 기다린다.
+        kill 뒤에도 헷지는 계속되어야 해서 이 함수는 절대 죽지 않는다.
         """
         if lighter_mid is None:
             return
         async with self.lock:
             st = self.states[base]
             try:
-                done = await self._hedge_attempts(base, lighter_mid)
+                outcome = await self._hedge_attempts(base, lighter_mid)
             except Exception as e:
                 log.exception("hedge %s unexpected error: %r", base, e)
-                done = False
-            if done:
+                outcome = FAILED
+            if outcome == DONE:
                 st.consecutive_failures = 0
-            else:
+            elif outcome == FAILED:
                 st.consecutive_failures += 1
                 log.error("hedge %s failed (consecutive %d), delta=%s", base, st.consecutive_failures, st.delta)
 
-    async def _hedge_attempts(self, base: str, lighter_mid: Decimal) -> bool:
-        """True면 차이가 최소 주문 미만으로 줄어 끝남. False면 이번 회차는 실패."""
+    async def _resolve_pending(self, base: str) -> str | None:
+        """확인 대기 중인 주문을 정리한다. 아직 기다려야 하면 WAITING, 정리됐으면 None."""
+        st = self.states[base]
+        p = st.pending
+        if p is None:
+            return None
+        try:
+            await self.refresh_lighter()
+        except Exception as e:
+            log.warning("hedge %s pending check: position refresh failed: %r", base, e)
+            return WAITING
+        if pending_confirmed(p, st.lighter_pos):
+            log.info("hedge %s unconfirmed order now reflected in position", base)
+            st.pending = None
+            return None
+        if time.time() - p.sent_ts < PENDING_CONFIRM_SEC:
+            return WAITING
+        log.warning("hedge %s unconfirmed order not reflected after %.0fs, treating as unfilled", base, PENDING_CONFIRM_SEC)
+        st.pending = None
+        st.consecutive_failures += 1
+        return None
+
+    async def _hedge_attempts(self, base: str, lighter_mid: Decimal) -> str:
         st = self.states[base]
         m = self.markets[base]
+        waiting = await self._resolve_pending(base)
+        if waiting:
+            return waiting
+        # 직전 회차들이 실패했으면(미체결로 만료 포함) 더 넓은 가격부터 시작한다
+        widen = min(st.consecutive_failures, self.retries - 1)
         for attempt in range(self.retries):
-            plan = hedge_order(st.delta, m, lighter_mid, self.slippage_bps * (attempt + 1))
+            plan = hedge_order(st.delta, m, lighter_mid, self.slippage_bps * (attempt + 1 + widen))
             if plan is None:
-                return True
+                return DONE
             size, is_sell, worst = plan
             before = st.lighter_pos
             st.last_attempt_ts = time.time()
+            # 이 순간부터 결과를 확인할 때까지는 체결됐을 수도 있는 주문으로 다룬다
+            st.pending = PendingHedge(size, is_sell, before, st.last_attempt_ts)
             try:
-                err = await self.trader.market_order(m, size, is_sell, worst)
+                rejected = await self.trader.market_order(m, size, is_sell, worst)
             except Exception as e:
-                # 주문이 거래소에 닿았는지 모른다. 아래에서 포지션을 다시 읽어 확인한다.
-                err = f"exception: {e!r}"
-            await asyncio.sleep(1.5)  # IOC라 이 사이에 체결되거나 사라진다. 실제 포지션으로 확인
+                rejected = None  # 응답 유실: 거래소에 닿았는지 모른다
+                log.warning("hedge %s send outcome unknown: %r", base, e)
+                unknown_error = f"unknown: {e!r}"
+            else:
+                unknown_error = ""
+            if rejected:
+                # 거래소가 거절했거나 서명 단계에서 실패: 확실히 체결 안 됨
+                st.pending = None
+                log.warning("hedge %s attempt %d rejected: %s", base, attempt + 1, rejected)
+                if self.record:
+                    self.record(base, size, is_sell, worst, lighter_mid, Decimal(0), rejected)
+                continue
+            await asyncio.sleep(1.5)  # IOC라 이 사이에 체결되거나 사라진다
             try:
                 await self.refresh_lighter()
             except Exception as e:
-                # 체결 여부를 모르는 채로 재시도하면 두 번 주문할 수 있다. 다음 대사에 맡긴다.
-                log.warning("lighter position refresh failed, retry deferred to next reconcile: %r", e)
+                log.warning("hedge %s position refresh failed, keeping order unconfirmed: %r", base, e)
                 if self.record:
-                    self.record(base, size, is_sell, worst, lighter_mid, "unknown", err or "refresh_failed")
-                return False
-            filled = abs(st.lighter_pos - before)
+                    self.record(base, size, is_sell, worst, lighter_mid, "unknown", unknown_error or "refresh_failed")
+                return WAITING
+            filled = st.lighter_pos - before
             if self.record:
-                self.record(base, size, is_sell, worst, lighter_mid, filled, err or "")
-            if err:
-                log.warning("hedge %s attempt %d rejected: %s", base, attempt + 1, err)
-            if filled > 0 and hedge_order(st.delta, m, lighter_mid, self.slippage_bps) is None:
-                return True
-        return False
+                self.record(base, size, is_sell, worst, lighter_mid, abs(filled), unknown_error)
+            if not pending_confirmed(st.pending, st.lighter_pos):
+                # 접수됐을 수 있는데 아직 포지션에 안 보인다: 다시 보내지 않고 기다린다
+                return WAITING
+            st.pending = None
+            if hedge_order(st.delta, m, lighter_mid, self.slippage_bps) is None:
+                return DONE
+        return FAILED

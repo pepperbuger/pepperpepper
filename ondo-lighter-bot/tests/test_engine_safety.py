@@ -96,18 +96,24 @@ class ExplodingTrader:
 
 
 async def test_hedger_survives_order_exception_and_counts_failure(monkeypatch):
+    """응답 유실은 '모름'이다: 확인 시간 동안 다시 보내지 않고, 만료될 때마다 실패로 센다."""
+    clock = {"t": 1000.0}
     monkeypatch.setattr("olbot.hedger.asyncio.sleep", _no_sleep)
-    h = Hedger(ExplodingTrader(), {"LIT": LIT}, 15, 3)
+    monkeypatch.setattr("olbot.hedger.time.time", lambda: clock["t"])
+    trader = ExplodingTrader()
+    h = Hedger(trader, {"LIT": LIT}, 15, 3)
     h.set_ondo_positions({"LIT": D("20")})
     await h.hedge("LIT", D("3"))  # 예외가 밖으로 나오면 안 된다
-    assert h.states["LIT"].consecutive_failures == 1
-    await h.hedge("LIT", D("3"))
-    await h.hedge("LIT", D("3"))
+    assert trader.calls == 1 and h.states["LIT"].pending is not None
+    for _ in range(3):
+        clock["t"] += 11  # 확인 시간 초과 -> 실패로 세고 다시 보낸다
+        await h.hedge("LIT", D("3"))
+    assert trader.calls == 4  # 확인 시간마다 한 번씩만
     assert h.states["LIT"].consecutive_failures == 3  # 3이면 위험 판단이 kill한다
 
 
 async def test_hedge_loop_keeps_running_when_lighter_raises(monkeypatch):
-    """검토에서 재현된 경로: Lighter 주문 중 예외 -> 헷지 루프가 죽으면 안 되고 실패가 누적돼야 한다."""
+    """검토에서 재현된 경로: Lighter 주문 중 예외 -> 헷지 루프가 죽으면 안 된다."""
     monkeypatch.setattr("olbot.hedger.asyncio.sleep", _no_sleep)
     eng = make_engine(FlakyOndo(fail_times=0))
     trader = ExplodingTrader()
@@ -128,8 +134,8 @@ async def test_hedge_loop_keeps_running_when_lighter_raises(monkeypatch):
     eng.cfg.hedging.reconcile_interval_sec = 0
     await asyncio.wait_for(eng.hedge_loop(), timeout=5)
     assert rounds["n"] == 3  # 예외에도 루프가 계속 돌았다
-    assert eng.hedger.states["LIT"].consecutive_failures == 3
-    assert trader.calls == 9  # 회차마다 3번씩 시도
+    assert trader.calls == 1  # 결과를 모르는 주문이 있는 동안 다시 보내지 않았다
+    assert eng.hedger.states["LIT"].pending is not None
 
 
 async def test_hedge_after_kill_still_runs(monkeypatch):
@@ -159,3 +165,128 @@ async def test_hedge_after_kill_still_runs(monkeypatch):
 
 async def _no_sleep(_):
     return None
+
+
+# ---------- 2차 검토 (0a36f84): 미확정 헷지 중복 전송, 조회 장애 시 노출 정지 ----------
+
+class LaggingTrader:
+    """주문은 접수되지만 응답을 잃거나(예외) 포지션 반영이 늦는 Lighter."""
+
+    def __init__(self, raise_on_send: bool, lag_reads: int) -> None:
+        self.real = D("0")          # 거래소의 실제 포지션
+        self.visible = D("0")       # 조회로 보이는 포지션 (늦게 따라온다)
+        self.raise_on_send = raise_on_send
+        self.lag_reads = lag_reads
+        self.reads_since_send = 0
+        self.sends = []
+
+    async def positions(self):
+        self.reads_since_send += 1
+        if self.reads_since_send > self.lag_reads:
+            self.visible = self.real
+        return {120: self.visible}
+
+    async def market_order(self, m, size, is_sell, worst):
+        self.sends.append((size, is_sell))
+        self.real += -size if is_sell else size
+        self.reads_since_send = 0
+        if self.raise_on_send:
+            raise ConnectionError("response lost")
+        return None
+
+
+async def _repeat_hedge(h, times, clock, step):
+    for _ in range(times):
+        await h.hedge("LIT", D("3"))
+        clock["t"] += step
+
+
+async def test_lost_response_order_is_not_resent_while_unconfirmed(monkeypatch):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("olbot.hedger.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr("olbot.hedger.time.time", lambda: clock["t"])
+    trader = LaggingTrader(raise_on_send=True, lag_reads=3)
+    h = Hedger(trader, {"LIT": LIT}, 15, 3)
+    h.set_ondo_positions({"LIT": D("20")})
+    await _repeat_hedge(h, 5, clock, 2.0)  # 대사 루프가 2초마다 다시 부르는 상황
+    assert trader.sends == [(D("20"), True)]  # 매도 20개 한 번만
+    assert h.states["LIT"].delta == 0
+    assert h.states["LIT"].pending is None
+
+
+async def test_accepted_but_lagging_position_is_not_resent(monkeypatch):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("olbot.hedger.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr("olbot.hedger.time.time", lambda: clock["t"])
+    trader = LaggingTrader(raise_on_send=False, lag_reads=2)
+    h = Hedger(trader, {"LIT": LIT}, 15, 3)
+    h.set_ondo_positions({"LIT": D("20")})
+    await _repeat_hedge(h, 5, clock, 2.0)
+    assert trader.sends == [(D("20"), True)]
+    assert h.states["LIT"].delta == 0
+
+
+async def test_unconfirmed_order_expires_then_retries_and_counts_failure(monkeypatch):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("olbot.hedger.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr("olbot.hedger.time.time", lambda: clock["t"])
+
+    class NeverFills(LaggingTrader):
+        async def market_order(self, m, size, is_sell, worst):
+            self.sends.append((size, is_sell))
+            return None  # 접수됐지만 IOC가 체결 없이 사라짐
+
+    trader = NeverFills(raise_on_send=False, lag_reads=0)
+    h = Hedger(trader, {"LIT": LIT}, 15, 3)
+    h.set_ondo_positions({"LIT": D("20")})
+    await h.hedge("LIT", D("3"))
+    assert len(trader.sends) == 1 and h.states["LIT"].pending is not None
+    clock["t"] += 5
+    await h.hedge("LIT", D("3"))
+    assert len(trader.sends) == 1  # 확인 대기 중에는 보내지 않는다
+    clock["t"] += 20  # 확인 시간 초과 -> 미체결로 보고 다시 보낸다
+    await h.hedge("LIT", D("3"))
+    assert len(trader.sends) == 2
+    assert h.states["LIT"].consecutive_failures >= 1
+
+
+class _WS:
+    connected = True
+    ready = True
+
+    def stale_for(self, now=None):
+        return 0.0
+
+
+def _risk_engine(monkeypatch, clock):
+    monkeypatch.setattr("olbot.engine.time.time", lambda: clock["t"])
+    eng = make_engine(FlakyOndo(fail_times=0))
+    eng.ondo_ws = eng.lighter_ws = eng.private_ws = _WS()
+    eng.lighter_markets = {b: LIT for b in eng.bases}
+    eng.hedger = Hedger(ExplodingTrader(), eng.lighter_markets, 15, 3)
+    eng.board.update_lighter("LIT", D("2.999"), D("3.001"), clock["t"])
+    eng.board.update_ondo("LIT", D("2.999"), D("3.001"), clock["t"])
+    eng.positions_ok_ts = clock["t"]
+    return eng
+
+
+async def test_unhedged_exposure_kills_even_when_position_reads_fail(monkeypatch):
+    clock = {"t": 1000.0}
+    eng = _risk_engine(monkeypatch, clock)
+    eng.hedger.states["LIT"].ondo_pos = D("20")  # 체결로 생긴 60달러 노출, 대사는 계속 실패 중
+    for _ in range(25):
+        await eng._risk_tick()
+        clock["t"] += 1
+    assert eng.hedger.states["LIT"].unhedged_since is not None
+    assert eng.killed and "LIT" in eng.killed
+
+
+async def test_stale_positions_pause_quoting(monkeypatch):
+    clock = {"t": 1000.0}
+    eng = _risk_engine(monkeypatch, clock)
+    clock["t"] += 31  # 31초 동안 포지션 조회 성공 없음
+    await eng._risk_tick()
+    assert eng.paused and "포지션" in eng.paused
+    eng.positions_ok_ts = clock["t"]
+    await eng._risk_tick()
+    assert eng.paused is None

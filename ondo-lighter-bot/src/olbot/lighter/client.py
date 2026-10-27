@@ -99,19 +99,27 @@ class LighterTrader:
         return coi
 
     async def market_order(self, m: LighterMarket, size: Decimal, is_sell: bool, worst_price: Decimal) -> str | None:
-        """IOC 시장가 주문. 접수되면 None, 실패하면 오류 문자열."""
+        """IOC 시장가 주문.
+
+        - None: 거래소가 접수함 (체결 여부는 포지션으로 확인)
+        - 문자열: 확실히 체결 안 됨 (서명 실패, HTTP 400 거절, 응답 코드가 200이 아님)
+        - 예외: 결과를 모름 (네트워크 오류 등). 호출 쪽이 미확정 주문으로 다뤄야 한다.
+        """
         base_amount = m.to_int_size(size)
         if base_amount <= 0:
             return "size rounds to zero"
+        # api_key_index를 넘기지 않는다: 넘기면 SDK가 논스 관리자를 건너뛰는 경로를 탄다.
+        # SignerClient에 키를 하나만 등록했으므로 SDK가 그 키와 다음 논스를 고른다.
         _tx, resp, err = await self.client.create_market_order(
             market_index=m.market_id,
             client_order_index=self._next_client_order_index(),
             base_amount=base_amount,
             avg_execution_price=m.to_int_price(worst_price),
             is_ask=is_sell,
-            api_key_index=self.api_key_index,
         )
         if err:
             return str(err)
+        if resp is not None and getattr(resp, "code", 200) != 200:
+            return f"code {resp.code}: {getattr(resp, 'message', '')}"
         log.info("lighter order accepted: %s %s %s worst=%s resp=%s", m.base, "sell" if is_sell else "buy", size, worst_price, resp)
         return None

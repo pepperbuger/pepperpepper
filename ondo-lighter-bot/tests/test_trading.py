@@ -182,14 +182,29 @@ def test_rest_snapshot_skips_recently_filled_market():
     assert h.states["SOL"].ondo_pos == D("0")
 
 
-async def test_hedger_retries_with_wider_slippage_then_counts_failure(monkeypatch):
+async def test_hedger_widens_slippage_after_unfilled_orders_expire(monkeypatch):
+    clock = {"t": 1000.0}
     monkeypatch.setattr("olbot.hedger.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr("olbot.hedger.time.time", lambda: clock["t"])
     h = Hedger(FakeTrader(fill=False), {"SOL": SOL}, 15, 3)
     h.set_ondo_positions({"SOL": D("-0.6")})
+    for _ in range(3):
+        await h.hedge("SOL", D("100"))
+        clock["t"] += 11  # 접수됐지만 체결 안 된 IOC는 확인 시간 뒤 만료
     await h.hedge("SOL", D("100"))
     worsts = [o[2] for o in h.trader.orders]
-    assert worsts == [D("100.15"), D("100.30"), D("100.45")]
+    assert worsts == [D("100.15"), D("100.30"), D("100.45"), D("100.45")]  # 3배에서 멈춘다
+    assert h.states["SOL"].consecutive_failures == 3
+
+
+async def test_hedger_retries_immediately_after_definite_rejection(monkeypatch):
+    monkeypatch.setattr("olbot.hedger.asyncio.sleep", _no_sleep)
+    h = Hedger(FakeTrader(err="order rejected: price"), {"SOL": SOL}, 15, 3)
+    h.set_ondo_positions({"SOL": D("-0.6")})
+    await h.hedge("SOL", D("100"))
+    assert [o[2] for o in h.trader.orders] == [D("100.15"), D("100.30"), D("100.45")]
     assert h.states["SOL"].consecutive_failures == 1
+    assert h.states["SOL"].pending is None  # 거절은 확실히 미체결이라 대기 상태가 아니다
 
 
 async def _no_sleep(_):
@@ -296,3 +311,33 @@ async def test_token_bucket_spacing():
     for _ in range(3):
         await b.acquire()
     assert time.monotonic() - t0 >= 0.09  # 첫 번째는 즉시, 나머지 둘은 0.05초씩
+
+
+async def test_lighter_trader_maps_sdk_outcomes():
+    from types import SimpleNamespace
+
+    from olbot.lighter.client import LighterTrader
+
+    t = LighterTrader("https://x", 1, 4, "k")
+    calls = []
+
+    class FakeClient:
+        def __init__(self, result=None, exc=None):
+            self.result, self.exc = result, exc
+
+        async def create_market_order(self, **kw):
+            calls.append(kw)
+            if self.exc:
+                raise self.exc
+            return self.result
+
+    t.client = FakeClient((None, SimpleNamespace(code=200, message=""), None))
+    assert await t.market_order(SOL, D("0.2"), True, D("99")) is None
+    assert "api_key_index" not in calls[-1]  # SDK 논스 관리자를 쓰도록 키 번호를 넘기지 않는다
+    t.client = FakeClient((None, SimpleNamespace(code=21500, message="not enough margin"), None))
+    assert "21500" in await t.market_order(SOL, D("0.2"), True, D("99"))
+    t.client = FakeClient((None, None, "invalid signature"))
+    assert await t.market_order(SOL, D("0.2"), True, D("99")) == "invalid signature"
+    t.client = FakeClient(exc=TimeoutError("read timeout"))
+    with pytest.raises(TimeoutError):  # 결과를 모르면 예외를 그대로 올려 호출 쪽이 미확정으로 다룬다
+        await t.market_order(SOL, D("0.2"), True, D("99"))

@@ -21,6 +21,7 @@ class RiskInputs:
     equity_start: Decimal | None
     equity_now: Decimal | None
     ondo_margin_usage: float | None
+    positions_stale_sec: float = 0.0  # 마지막으로 양쪽 포지션 조회에 성공한 뒤 지난 시간
 
 
 @dataclass
@@ -30,7 +31,8 @@ class RiskDecision:
 
 
 def evaluate(inp: RiskInputs, max_unhedged_usd: Decimal, max_unhedged_sec: float, ws_stale_sec: float,
-             daily_loss_limit_usd: Decimal, max_margin_usage: float) -> RiskDecision:
+             daily_loss_limit_usd: Decimal, max_margin_usage: float,
+             positions_stale_limit_sec: float = 30.0) -> RiskDecision:
     for base, usd in inp.unhedged_usd.items():
         since = inp.unhedged_since.get(base)
         if usd > max_unhedged_usd and since is not None and inp.now - since > max_unhedged_sec:
@@ -41,6 +43,9 @@ def evaluate(inp: RiskInputs, max_unhedged_usd: Decimal, max_unhedged_sec: float
         loss = inp.equity_start - inp.equity_now
         if loss > daily_loss_limit_usd:
             return RiskDecision(kill_reason=f"손실 {loss:.2f} USD가 한도 {daily_loss_limit_usd} 초과")
+    if inp.positions_stale_sec > positions_stale_limit_sec:
+        # 포지션을 모르면 노출도 모른다. 호가를 멈추고 조회가 돌아오면 재개한다.
+        return RiskDecision(pause_reason=f"포지션 조회 실패 {inp.positions_stale_sec:.0f}초")
     if inp.ondo_margin_usage is not None and inp.ondo_margin_usage > max_margin_usage:
         return RiskDecision(pause_reason=f"Ondo 증거금 사용률 {inp.ondo_margin_usage:.0%}")
     if not inp.private_ws_up:

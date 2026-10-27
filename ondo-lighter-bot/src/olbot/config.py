@@ -80,6 +80,7 @@ class RiskCfg:
     max_margin_usage: float = 0.5
     daily_loss_limit_usd: Decimal = Decimal("100")
     max_total_inventory_usd: Decimal = Decimal("5000")
+    positions_stale_sec: float = 30.0  # 양쪽 포지션 조회가 이 시간 넘게 실패하면 호가 일시정지
 
 
 @dataclass
