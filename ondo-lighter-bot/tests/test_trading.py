@@ -182,19 +182,15 @@ def test_rest_snapshot_skips_recently_filled_market():
     assert h.states["SOL"].ondo_pos == D("0")
 
 
-async def test_hedger_widens_slippage_after_unfilled_orders_expire(monkeypatch):
-    clock = {"t": 1000.0}
+async def test_hedger_widens_slippage_after_definitely_rejected_round(monkeypatch):
     monkeypatch.setattr("olbot.hedger.asyncio.sleep", _no_sleep)
-    monkeypatch.setattr("olbot.hedger.time.time", lambda: clock["t"])
-    h = Hedger(FakeTrader(fill=False), {"SOL": SOL}, 15, 3)
+    h = Hedger(FakeTrader(err="order rejected: price"), {"SOL": SOL}, 15, 3)
     h.set_ondo_positions({"SOL": D("-0.6")})
-    for _ in range(3):
-        await h.hedge("SOL", D("100"))
-        clock["t"] += 11  # 접수됐지만 체결 안 된 IOC는 확인 시간 뒤 만료
     await h.hedge("SOL", D("100"))
-    worsts = [o[2] for o in h.trader.orders]
-    assert worsts == [D("100.15"), D("100.30"), D("100.45"), D("100.45")]  # 3배에서 멈춘다
-    assert h.states["SOL"].consecutive_failures == 3
+    assert [o[2] for o in h.trader.orders] == [D("100.15"), D("100.30"), D("100.45")]
+    await h.hedge("SOL", D("100"))
+    assert h.trader.orders[3][2] == D("100.30")
+    assert h.states["SOL"].consecutive_failures == 2 and h.states["SOL"].pending is None
 
 
 async def test_hedger_retries_immediately_after_definite_rejection(monkeypatch):

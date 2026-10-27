@@ -95,8 +95,8 @@ class ExplodingTrader:
         raise ConnectionError("lighter down")
 
 
-async def test_hedger_survives_order_exception_and_counts_failure(monkeypatch):
-    """응답 유실은 '모름'이다: 확인 시간 동안 다시 보내지 않고, 만료될 때마다 실패로 센다."""
+async def test_hedger_survives_order_exception_and_keeps_pending(monkeypatch):
+    """응답 유실은 '모름'이다. 시간 경과로 실패/미체결을 확정하지 않는다."""
     clock = {"t": 1000.0}
     monkeypatch.setattr("olbot.hedger.asyncio.sleep", _no_sleep)
     monkeypatch.setattr("olbot.hedger.time.time", lambda: clock["t"])
@@ -106,10 +106,11 @@ async def test_hedger_survives_order_exception_and_counts_failure(monkeypatch):
     await h.hedge("LIT", D("3"))  # 예외가 밖으로 나오면 안 된다
     assert trader.calls == 1 and h.states["LIT"].pending is not None
     for _ in range(3):
-        clock["t"] += 11  # 확인 시간 초과 -> 실패로 세고 다시 보낸다
+        clock["t"] += 11
         await h.hedge("LIT", D("3"))
-    assert trader.calls == 4  # 확인 시간마다 한 번씩만
-    assert h.states["LIT"].consecutive_failures == 3  # 3이면 위험 판단이 kill한다
+    assert trader.calls == 1
+    assert h.states["LIT"].consecutive_failures == 0
+    assert h.states["LIT"].pending is not None
 
 
 async def test_hedge_loop_keeps_running_when_lighter_raises(monkeypatch):
@@ -226,7 +227,7 @@ async def test_accepted_but_lagging_position_is_not_resent(monkeypatch):
     assert h.states["LIT"].delta == 0
 
 
-async def test_unconfirmed_order_expires_then_retries_and_counts_failure(monkeypatch):
+async def test_unconfirmed_order_never_expires_without_final_evidence(monkeypatch):
     clock = {"t": 1000.0}
     monkeypatch.setattr("olbot.hedger.asyncio.sleep", _no_sleep)
     monkeypatch.setattr("olbot.hedger.time.time", lambda: clock["t"])
@@ -244,10 +245,11 @@ async def test_unconfirmed_order_expires_then_retries_and_counts_failure(monkeyp
     clock["t"] += 5
     await h.hedge("LIT", D("3"))
     assert len(trader.sends) == 1  # 확인 대기 중에는 보내지 않는다
-    clock["t"] += 20  # 확인 시간 초과 -> 미체결로 보고 다시 보낸다
+    clock["t"] += 3600  # 체결이 안 보여도 미체결/만료를 확정할 수 없다
     await h.hedge("LIT", D("3"))
-    assert len(trader.sends) == 2
-    assert h.states["LIT"].consecutive_failures >= 1
+    assert len(trader.sends) == 1
+    assert h.states["LIT"].pending is not None
+    assert h.states["LIT"].consecutive_failures == 0
 
 
 class _WS:

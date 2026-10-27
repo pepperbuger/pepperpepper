@@ -1,13 +1,10 @@
-"""SQLite 기록. 지금은 2단계용 테이블(괴리 샘플, 이벤트)만 있다.
-
-SPEC 6번의 나머지 테이블(quote_snapshots, fills, hedges, funding, rewards)은
-해당 단계를 구현할 때 같은 방식으로 추가한다.
-"""
+"""SQLite 운영 기록과 재시작 후 복원할 미확정 헷지 상태."""
 
 from __future__ import annotations
 
 import sqlite3
 import time
+from decimal import Decimal
 from pathlib import Path
 
 from olbot.market import MarketState
@@ -48,6 +45,12 @@ CREATE TABLE IF NOT EXISTS equity (
 CREATE TABLE IF NOT EXISTS rewards (
     ts REAL NOT NULL, week_start TEXT, week_end TEXT, usdc TEXT, points TEXT, note TEXT
 );
+CREATE TABLE IF NOT EXISTS pending_hedges (
+    scope TEXT NOT NULL, base TEXT NOT NULL,
+    size TEXT NOT NULL, is_sell INTEGER NOT NULL,
+    lighter_pos_before TEXT NOT NULL, sent_ts REAL NOT NULL,
+    PRIMARY KEY (scope, base)
+);
 """
 
 
@@ -85,6 +88,27 @@ class Ledger:
 
     def commit(self) -> None:
         self.db.commit()
+
+    def save_pending_hedge(self, scope: str, base: str, pending) -> None:
+        """전송 전 미확정을 영속화한다. scope는 거래소 URL+계정 번호이며 키는 저장하지 않는다."""
+        if pending is None:
+            self.db.execute("DELETE FROM pending_hedges WHERE scope=? AND base=?", (scope, base))
+        else:
+            self.db.execute(
+                "INSERT OR REPLACE INTO pending_hedges VALUES (?,?,?,?,?,?)",
+                (scope, base, str(pending.size), int(pending.is_sell),
+                 str(pending.lighter_pos_before), pending.sent_ts),
+            )
+        self.db.commit()
+
+    def load_pending_hedges(self, scope: str) -> dict:
+        from olbot.hedger import PendingHedge
+
+        rows = self.db.execute(
+            "SELECT base,size,is_sell,lighter_pos_before,sent_ts FROM pending_hedges WHERE scope=?", (scope,)
+        ).fetchall()
+        return {base: PendingHedge(Decimal(size), bool(is_sell), Decimal(before), sent_ts)
+                for base, size, is_sell, before, sent_ts in rows}
 
     def record_fill(self, base: str, fill: dict, ondo_mid, lighter_mid) -> bool:
         """Ondo 체결 한 건. 같은 fill id가 다시 오면 무시하고 False."""

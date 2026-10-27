@@ -25,7 +25,7 @@ from olbot.markets import fetch_ondo_perps, resolve
 from olbot.ondo.ws import OndoPublicWS
 from olbot.quoter import TargetQuotes, QuoteSide, needs_requote, target_quotes, to_order_payloads
 from olbot.ratelimit import TokenBucket
-from olbot.risk import RiskInputs, evaluate
+from olbot.risk import RiskInputs, evaluate, pending_pause_reason
 
 log = logging.getLogger("olbot.engine")
 
@@ -93,8 +93,13 @@ class Engine:
         self.ondo_rest = OndoRest(self.cfg.ondo.rest_url, s.ondo_api_key_id, s.ondo_api_secret, self.bucket)
         self.trader = LighterTrader(self.cfg.lighter.base_url, int(s.lighter_account_index),
                                     int(s.lighter_api_key_index), s.lighter_api_key_private_key)
-        self.hedger = Hedger(self.trader, self.lighter_markets, self.cfg.hedging.max_slippage_bps,
-                             self.cfg.hedging.retries, record=self.ledger.record_hedge)
+        pending_scope = f"{self.cfg.lighter.base_url.rstrip('/')}:account:{int(s.lighter_account_index)}"
+        self.hedger = Hedger(
+            self.trader, self.lighter_markets, self.cfg.hedging.max_slippage_bps, self.cfg.hedging.retries,
+            record=self.ledger.record_hedge,
+            initial_pending=self.ledger.load_pending_hedges(pending_scope),
+            save_pending=lambda base, pending: self.ledger.save_pending_hedge(pending_scope, base, pending),
+        )
         self.private_ws = OndoPrivateWS(
             self.cfg.ondo.ws_url, s.ondo_api_key_id, s.ondo_api_secret,
             [self.ondo_meta[b]["market"] for b in self.bases],
@@ -232,7 +237,8 @@ class Engine:
     async def _quote_market(self, b: str, now: float) -> None:
         q = self.cfg.quoting
         mid = self.ondo_mid(b)
-        blocked = self.killed or self.paused or (mid is None and "no_quote") or self.market_block_reason(b, now)
+        pending_block = pending_pause_reason(self.hedger.overdue_pending(now)) if self.hedger else None
+        blocked = self.killed or self.paused or pending_block or (mid is None and "no_quote") or self.market_block_reason(b, now)
         if blocked:
             if self.current[b] is not None:
                 await self.pull_market(b, str(blocked))
@@ -281,6 +287,10 @@ class Engine:
         try:
             await self.ondo_rest.cancel_all(market)
             self.current[b] = None
+            # 취소/요청 예산 대기 중에 미확정 주문이 오래됐을 수도 있다.
+            if (self.killed or self.paused or self.stop.is_set()
+                    or (self.hedger and self.hedger.overdue_pending(time.time()))):
+                return
             payload = to_order_payloads(market, target)
             if not payload:
                 return
@@ -301,8 +311,9 @@ class Engine:
         for f in failed:
             log.warning("%s 주문 거절: %s", b, f)
         self.current[b] = TargetQuotes(bid, ask)
-        if self.killed or self.stop.is_set():  # 주문을 넣는 사이에 정지됐으면 바로 거둔다
-            await self.pull_market(b, self.killed or "stopping")
+        if (self.killed or self.paused or self.stop.is_set()
+                or (self.hedger and self.hedger.overdue_pending(time.time()))):
+            await self.pull_market(b, self.killed or self.paused or "stopping or unconfirmed hedge")
 
     async def hedge_loop(self) -> None:
         while not self.stop.is_set():
@@ -318,7 +329,7 @@ class Engine:
                 mid = self.lighter_mid(b) or self.ondo_mid(b)
                 if mid is None:
                     continue
-                if self.hedger.unhedged_usd(b, mid) >= self.min_hedge_usd(b, mid):
+                if st.pending is not None or self.hedger.unhedged_usd(b, mid) >= self.min_hedge_usd(b, mid):
                     try:
                         await self.hedger.hedge(b, self.lighter_mid(b))
                     except Exception:
@@ -366,6 +377,7 @@ class Engine:
                 equity_now=self.equity_now,
                 ondo_margin_usage=self.ondo_margin_usage,
                 positions_stale_sec=now - (self.positions_ok_ts or now),
+                pending_hedges_overdue=self.hedger.overdue_pending(now),
             ),
             r.max_unhedged_usd, r.max_unhedged_sec, r.ws_stale_sec, r.daily_loss_limit_usd, r.max_margin_usage,
             r.positions_stale_sec,

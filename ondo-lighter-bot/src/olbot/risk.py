@@ -22,12 +22,17 @@ class RiskInputs:
     equity_now: Decimal | None
     ondo_margin_usage: float | None
     positions_stale_sec: float = 0.0  # 마지막으로 양쪽 포지션 조회에 성공한 뒤 지난 시간
+    pending_hedges_overdue: tuple[str, ...] = ()
 
 
 @dataclass
 class RiskDecision:
     kill_reason: str | None = None
     pause_reason: str | None = None
+
+
+def pending_pause_reason(bases: tuple[str, ...]) -> str | None:
+    return f"헷지 주문 미확정: {','.join(bases)} (재전송 금지, 주문 상태 확인 필요)" if bases else None
 
 
 def evaluate(inp: RiskInputs, max_unhedged_usd: Decimal, max_unhedged_sec: float, ws_stale_sec: float,
@@ -43,6 +48,8 @@ def evaluate(inp: RiskInputs, max_unhedged_usd: Decimal, max_unhedged_sec: float
         loss = inp.equity_start - inp.equity_now
         if loss > daily_loss_limit_usd:
             return RiskDecision(kill_reason=f"손실 {loss:.2f} USD가 한도 {daily_loss_limit_usd} 초과")
+    if inp.pending_hedges_overdue:
+        return RiskDecision(pause_reason=pending_pause_reason(inp.pending_hedges_overdue))
     if inp.positions_stale_sec > positions_stale_limit_sec:
         # 포지션을 모르면 노출도 모른다. 호가를 멈추고 조회가 돌아오면 재개한다.
         return RiskDecision(pause_reason=f"포지션 조회 실패 {inp.positions_stale_sec:.0f}초")
