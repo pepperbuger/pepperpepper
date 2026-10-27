@@ -1,0 +1,59 @@
+# config.yaml로 복사해서 사용한다. 비밀값은 여기에 넣지 말고 .env에 넣는다.
+
+mode: dry_run            # dry_run | live (live는 실행 시 --live 플래그도 필요)
+
+ondo:
+  rest_url: https://api.ondoperps-sandbox.xyz   # 메인넷: https://api.ondoperps.xyz
+  ws_url: wss://api.ondoperps-sandbox.xyz/ws     # 메인넷: wss://api.ondoperps.xyz/ws
+  rest_rate_per_sec: 1.0         # 공개 베타 기본 제한
+  rest_reserved_per_min: 10      # 대사와 비상 취소용으로 남겨둘 요청 수
+  leverage: 3
+  deadman_timeout_sec: 30
+  deadman_heartbeat_sec: 10
+
+lighter:
+  base_url: https://testnet.zklighter.elliot.ai  # 메인넷: https://mainnet.zklighter.elliot.ai
+  ws_url: wss://testnet.zklighter.elliot.ai/stream
+  leverage: 3
+
+quoting:
+  band_bps: 25                   # 리워드 인정 범위로 추정 (SPEC 11번에서 확인)
+  offset_bps: 18                 # 중간가에서 호가까지 거리
+  requote_threshold_bps: 6
+  skew_bps_per_1k: 2             # 재고 1,000달러당 호가를 미는 정도
+  max_basis_bps: 30              # Ondo와 Lighter 중간가 괴리가 이보다 크면 호가 중단
+  quote_when_underlying_closed: false
+  inventory_mode: flatten        # flatten | hold_for_funding
+
+hedging:
+  max_slippage_bps: 15
+  retries: 3
+  reconcile_interval_sec: 10
+  ondo_rest_reconcile_sec: 30
+
+risk:
+  max_unhedged_usd: 300
+  max_unhedged_sec: 20
+  ws_stale_sec: 10
+  max_margin_usage: 0.5
+  daily_loss_limit_usd: 100
+  max_total_inventory_usd: 5000
+
+markets:                         # 1주차 후보. ondo_depth_probe.py 결과로 교체
+  - base: LIT
+    size_usd_per_side: 500
+    max_inventory_usd: 2000
+  - base: NEAR
+    size_usd_per_side: 500
+    max_inventory_usd: 2000
+  - base: ENA
+    size_usd_per_side: 750
+    max_inventory_usd: 2000
+  - base: SOL                    # 두꺼운 마켓과 비교용
+    size_usd_per_side: 750
+    max_inventory_usd: 2000
+
+storage:
+  sqlite_path: data/olbot.sqlite
+  quote_snapshot_sec: 30
+  band_depth_sec: 300
