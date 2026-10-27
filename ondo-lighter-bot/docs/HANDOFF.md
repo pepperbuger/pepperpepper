@@ -5,7 +5,9 @@
 ## Claude Code에 맡기기 전에 직접 할 것
 
 1. 저장소 받기: `pepperbuger/pepperpepper`의 `claude/tender-ramanujan-hvzxq8` 브랜치(PR #1). PR이 병합됐다면 `main`.
-2. Ondo 키 만들기: 샌드박스용 키를 먼저 만든다. 권한은 거래와 조회만, 출금 권한 없음. 집 PC 공인 IP를 화이트리스트에 등록한다.
+2. Ondo 키 만들기: 권한은 거래와 조회만, 출금 권한 없음. 집 PC 공인 IP를 화이트리스트에 등록한다.
+   - 샌드박스는 자유롭게 쓸 수 없다(2026-10-27 확인). 공식 Builder Integration Guide의 Sandbox access 절차는 builders@ondoperps.xyz에 계정 ID와 앱 공개 URL을 보내면 팀이 초대 코드와 API 키 관리를 열어주는 방식이고, 샌드박스 웹사이트는 로그인 벽(Vercel SSO)에 막혀 있다. 샌드박스 REST의 공개 조회(`/v1/markets`)는 응답한다.
+   - 샌드박스를 못 받으면: 3단계(인증, 잔고와 포지션 조회)는 메인넷 키로 조회만 해서 검증한다. 주문이 들어가는 4~6단계 테스트는 dry_run으로 최대한 하고, 실제 주문 검증은 메인넷에서 체결될 수 없는 먼 가격의 최소 수량 post-only 주문으로, 매번 사람 승인 후에 한다.
 3. Lighter 키 만들기: 테스트넷 계정에 API 키를 등록한다(인덱스 4~254). L1 지갑 개인키는 등록할 때 한 번만 쓰고 봇 PC에 두지 않는다.
 4. `.env.example`을 `.env`로, `config.example.yaml`을 `config.yaml`로 복사하고 키를 채운다.
 5. Claude Code가 대신 확인할 수 없는 것:
