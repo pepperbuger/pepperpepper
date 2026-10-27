@@ -9,7 +9,7 @@
    - 샌드박스는 자유롭게 쓸 수 없다(2026-10-27 확인). 공식 Builder Integration Guide의 Sandbox access 절차는 builders@ondoperps.xyz에 계정 ID와 앱 공개 URL을 보내면 팀이 초대 코드와 API 키 관리를 열어주는 방식이고, 샌드박스 웹사이트는 로그인 벽(Vercel SSO)에 막혀 있다. 샌드박스 REST의 공개 조회(`/v1/markets`)는 응답한다.
    - 샌드박스를 못 받으면: 3단계(인증, 잔고와 포지션 조회)는 메인넷 키로 조회만 해서 검증한다. 주문이 들어가는 4~6단계 테스트는 dry_run으로 최대한 하고, 실제 주문 검증은 메인넷에서 체결될 수 없는 먼 가격의 최소 수량 post-only 주문으로, 매번 사람 승인 후에 한다.
 3. Lighter 키 만들기: 테스트넷 계정에 API 키를 등록한다(인덱스 4~254). L1 지갑 개인키는 등록할 때 한 번만 쓰고 봇 PC에 두지 않는다.
-4. `.env.example`을 `.env`로, `config.example.yaml`을 `config.yaml`로 복사하고 키를 채운다.
+4. `.env.example`을 `.env`로, `config.example.yaml`을 `config.yaml`로 복사하고 키를 채운다. 샌드박스 접근이 없으면 `config.yaml`의 `ondo.rest_url`을 `https://api.ondoperps.xyz`, `ondo.ws_url`을 `wss://api.ondoperps.xyz/ws`로 바꾼다(`check-config`가 메인넷 경고를 띄우는 게 정상).
 5. Claude Code가 대신 확인할 수 없는 것:
    - Ondo 유동성 풀 배분 방식: 25bps 조건이 맞는지, 매수와 매도를 양쪽 다 걸어야 하는지, 마켓별 배분 (앱 공지, 디스코드)
    - 한국 거주자의 리워드와 포인트 수령 자격
@@ -30,7 +30,9 @@ ondo-lighter-bot 폴더에서 작업한다. 먼저 CLAUDE.md, OVERVIEW.md, docs/
 할 일: SPEC 8번의 3단계부터 한 단계씩 진행한다.
 - 각 단계의 완료 기준을 통과하면 멈추고 결과를 보고한다. 내가 확인하기 전에는 다음 단계로 넘어가지 않는다.
 - 엔드포인트, 파라미터, 채널 이름은 추측하지 말고 docs.ondoperps.xyz/llms.txt와 apidocs.lighter.xyz/llms.txt에서 확인한다.
-- 개발과 테스트는 Ondo 샌드박스와 Lighter 테스트넷에서만 한다.
+- Ondo는 샌드박스 접근이 없으므로 메인넷을 쓴다. 메인넷에서는 조회와 dry_run이 기본이고,
+  실제 주문은 체결될 수 없는 먼 가격의 최소 수량 post-only 주문만, 매번 나에게 승인받은 뒤 보낸다.
+  Lighter는 테스트넷에서 먼저 검증한다.
 - 메인넷 주문, 출금, 이체, 계정 등급 변경, API 키 등록은 실행 전에 반드시 나에게 묻는다.
 - 키는 .env에서만 읽고, 로그와 커밋에 절대 남기지 않는다.
 - 새 WS 클라이언트는 src/olbot/wsbase.py의 ReconnectingWS를 상속하고,
@@ -43,7 +45,7 @@ ondo-lighter-bot 폴더에서 작업한다. 먼저 CLAUDE.md, OVERVIEW.md, docs/
 
 | 단계 | 내용 | 완료 기준 |
 |---|---|---|
-| 3 | Ondo 인증: 요청 서명, WS 로그인, 잔고와 포지션 조회, 데드맨 스위치 | 샌드박스에서 잔고 조회 성공, 서명 문자열 단위 테스트 |
+| 3 | Ondo 인증: 요청 서명, WS 로그인, 잔고와 포지션 조회, 데드맨 스위치 | 메인넷 키로 잔고와 포지션 조회 성공(주문 없음), 서명 문자열 단위 테스트 |
 | 4 | 가짜 주문 모드(dry_run) 호가기 | 24시간 돌려서 분당 요청 50회 이하 |
 | 5 | Lighter 헷지 | 테스트넷에서 주문, 체결 확인, 실패 재시도 테스트 |
 | 6 | 안전장치 | 킬 스위치 조건 전부 테스트 통과, 프로세스 강제 종료 시 30초 안에 Ondo 호가 사라짐 확인 |

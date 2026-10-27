@@ -11,7 +11,7 @@
 ## 안전 규칙
 
 - 메인넷 주문, 출금, 이체, 계정 등급 변경, API 키 등록은 실행 전에 반드시 사람에게 확인받는다.
-- 개발과 테스트는 Ondo 샌드박스(`api.ondoperps-sandbox.xyz`)와 Lighter 테스트넷(`testnet.zklighter.elliot.ai`)을 기본으로 한다.
+- Ondo 샌드박스는 팀 승인이 있어야 쓸 수 있어서 기본으로 메인넷을 쓴다. 대신 Ondo 메인넷에서는 조회와 dry_run을 기본으로 하고, 실제 주문은 체결될 수 없는 먼 가격의 최소 수량 post-only 주문만, 매번 사람 승인 후에 보낸다. Lighter는 테스트넷(`testnet.zklighter.elliot.ai`)에서 먼저 검증한다.
 - 비밀값은 `.env`에서만 읽는다. 코드, 로그, 예외 메시지, 커밋에 키가 들어가면 안 된다.
 - Lighter L1 지갑 개인키는 봇 코드가 읽지 않는다. 봇은 API 키(인덱스 4~254)만 쓴다.
 - 기본 실행 모드는 `dry_run`이다. live는 설정 `mode: live`와 명령행 `--live`가 둘 다 있어야 한다.
