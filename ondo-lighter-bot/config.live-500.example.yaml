@@ -39,7 +39,7 @@ risk:
   max_unhedged_sec: 20
   ws_stale_sec: 10
   max_margin_usage: 0.6
-  daily_loss_limit_usd: 25       # 시작 자산 대비 25달러 손실이면 전체 정지
+  daily_loss_limit_usd: 25       # 시작 대비 자산이 25달러 줄면 호가 정지. 최대 손실 보장 아님 (자산은 약 1분마다 조회)
   max_total_inventory_usd: 350
 
 markets:

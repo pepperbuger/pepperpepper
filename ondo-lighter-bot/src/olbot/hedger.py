@@ -72,38 +72,56 @@ class Hedger:
         return abs(self.states[base].delta) * mid
 
     async def hedge(self, base: str, lighter_mid: Decimal | None) -> None:
-        """한 마켓의 차이를 헷지한다. 실패하면 슬리피지를 넓혀 retries번 다시 시도한다."""
+        """한 마켓의 차이를 헷지한다. 실패하면 슬리피지를 넓혀 retries번 다시 시도한다.
+
+        예외를 밖으로 내보내지 않는다. 헷지가 실패하면 consecutive_failures를 올리고,
+        이 값이 위험 판단(kill)과 다음 대사의 재시도를 이끈다. kill 뒤에도 헷지는 계속되어야 해서다.
+        """
         if lighter_mid is None:
             return
         async with self.lock:
             st = self.states[base]
-            m = self.markets[base]
-            for attempt in range(self.retries):
-                plan = hedge_order(st.delta, m, lighter_mid, self.slippage_bps * (attempt + 1))
-                if plan is None:
-                    st.consecutive_failures = 0
-                    return
-                size, is_sell, worst = plan
-                before = st.lighter_pos
-                st.last_attempt_ts = time.time()
+            try:
+                done = await self._hedge_attempts(base, lighter_mid)
+            except Exception as e:
+                log.exception("hedge %s unexpected error: %r", base, e)
+                done = False
+            if done:
+                st.consecutive_failures = 0
+            else:
+                st.consecutive_failures += 1
+                log.error("hedge %s failed (consecutive %d), delta=%s", base, st.consecutive_failures, st.delta)
+
+    async def _hedge_attempts(self, base: str, lighter_mid: Decimal) -> bool:
+        """True면 차이가 최소 주문 미만으로 줄어 끝남. False면 이번 회차는 실패."""
+        st = self.states[base]
+        m = self.markets[base]
+        for attempt in range(self.retries):
+            plan = hedge_order(st.delta, m, lighter_mid, self.slippage_bps * (attempt + 1))
+            if plan is None:
+                return True
+            size, is_sell, worst = plan
+            before = st.lighter_pos
+            st.last_attempt_ts = time.time()
+            try:
                 err = await self.trader.market_order(m, size, is_sell, worst)
-                await asyncio.sleep(1.5)  # 체결 반영 대기 후 실제 포지션으로 확인
-                try:
-                    await self.refresh_lighter()
-                except Exception as e:
-                    # 체결 여부를 모르는 채로 재시도하면 두 번 주문할 수 있다. 다음 대사에 맡긴다.
-                    log.warning("lighter position refresh failed, retry deferred to next reconcile: %r", e)
-                    if self.record:
-                        self.record(base, size, is_sell, worst, lighter_mid, "unknown", err or "refresh_failed")
-                    return
-                filled = abs(st.lighter_pos - before)
+            except Exception as e:
+                # 주문이 거래소에 닿았는지 모른다. 아래에서 포지션을 다시 읽어 확인한다.
+                err = f"exception: {e!r}"
+            await asyncio.sleep(1.5)  # IOC라 이 사이에 체결되거나 사라진다. 실제 포지션으로 확인
+            try:
+                await self.refresh_lighter()
+            except Exception as e:
+                # 체결 여부를 모르는 채로 재시도하면 두 번 주문할 수 있다. 다음 대사에 맡긴다.
+                log.warning("lighter position refresh failed, retry deferred to next reconcile: %r", e)
                 if self.record:
-                    self.record(base, size, is_sell, worst, lighter_mid, filled, err or "")
-                if err:
-                    log.warning("hedge %s attempt %d rejected: %s", base, attempt + 1, err)
-                if err is None and filled > 0:
-                    st.consecutive_failures = 0
-                    if hedge_order(st.delta, m, lighter_mid, self.slippage_bps) is None:
-                        return
-            st.consecutive_failures += 1
-            log.error("hedge %s failed after %d attempts, delta=%s", base, self.retries, st.delta)
+                    self.record(base, size, is_sell, worst, lighter_mid, "unknown", err or "refresh_failed")
+                return False
+            filled = abs(st.lighter_pos - before)
+            if self.record:
+                self.record(base, size, is_sell, worst, lighter_mid, filled, err or "")
+            if err:
+                log.warning("hedge %s attempt %d rejected: %s", base, attempt + 1, err)
+            if filled > 0 and hedge_order(st.delta, m, lighter_mid, self.slippage_bps) is None:
+                return True
+        return False

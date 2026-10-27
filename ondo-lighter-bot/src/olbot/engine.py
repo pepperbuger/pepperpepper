@@ -30,7 +30,9 @@ from olbot.risk import RiskInputs, evaluate
 log = logging.getLogger("olbot.engine")
 
 REQUOTE_COST = 2  # 마켓 단위 전체 취소 1회 + 일괄 생성 1회
-FILL_SETTLE_SEC = 5.0  # 체결 직후 이 시간 동안은 REST 포지션 스냅샷으로 덮어쓰지 않는다
+FILL_SETTLE_SEC = 5.0
+# 주문 상태를 모르는 마켓. None(확실히 없음)과 구분해서, 다음 루프가 취소부터 하게 만든다.
+UNKNOWN_QUOTES = TargetQuotes(None, None)  # 체결 직후 이 시간 동안은 REST 포지션 스냅샷으로 덮어쓰지 않는다
 
 
 class Engine:
@@ -149,7 +151,8 @@ class Engine:
         self.last_fill_ts[base] = time.time()
         self.dirty.add(base)
         log.info("FILL %s %s %s @ %s maker=%s", base, fill.get("side"), size, fill.get("price"), fill.get("isMaker"))
-        asyncio.get_running_loop().create_task(self.hedger.hedge(base, self.lighter_mid(base)))
+        task = asyncio.get_running_loop().create_task(self.hedger.hedge(base, self.lighter_mid(base)))
+        task.add_done_callback(_log_task_error)
 
     async def reconcile_positions(self) -> None:
         """Ondo 포지션은 REST가 기준이다. WS 포지션 채널은 청산된 포지션을 0으로 보내준다는 보장이 없다."""
@@ -176,22 +179,32 @@ class Engine:
         self.killed = reason
         log.error("KILL: %s -> Ondo 호가 전부 취소, 신규 호가 중단 (헷지는 계속)", reason)
         self.ledger.record_event("risk", "kill", reason)
+        # 실패해도 주문 추적이 남아 있으므로 quote_loop가 마켓별 취소를 계속 다시 시도한다
         await self.cancel_all_quotes()
 
-    async def cancel_all_quotes(self) -> None:
-        if self.live and self.ondo_rest is not None:
+    async def cancel_all_quotes(self, attempts: int = 1) -> bool:
+        """Ondo 주문 전부 취소. 성공했을 때만 로컬 추적을 지운다 (실패하면 거래소에 남아 있을 수 있다)."""
+        if not self.live or self.ondo_rest is None:
+            for b in self.bases:
+                self.current[b] = None
+            return True
+        for i in range(attempts):
             try:
                 await self.ondo_rest.cancel_all()
                 self.requests_sent += 1
+                for b in self.bases:
+                    self.current[b] = None
+                return True
             except Exception as e:
-                log.error("cancel_all 실패: %r", e)
-        for b in self.bases:
-            self.current[b] = None
+                log.error("cancel_all 실패 (%d/%d): %r", i + 1, attempts, e)
+                self.ledger.record_event("engine", "cancel_failed", repr(e)[:200])
+                if i + 1 < attempts:
+                    await asyncio.sleep(2 ** i)
+        return False
 
     # ---------- 루프 ----------
 
     async def quote_loop(self) -> None:
-        q = self.cfg.quoting
         i = 0
         while not self.stop.is_set():
             await asyncio.sleep(1.0)
@@ -206,38 +219,52 @@ class Engine:
                 continue
             b = self.bases[i % len(self.bases)]
             i += 1
-            mid = self.ondo_mid(b)
-            blocked = self.killed or self.paused or (mid is None and "no_quote") or self.market_block_reason(b, now)
-            if blocked:
-                if self.current[b] is not None:
-                    await self.pull_market(b, str(blocked))
-                continue
-            m = self.mcfg[b]
-            meta = self.ondo_meta[b]
-            total_inv = sum(abs(self.inventory(x) * (self.ondo_mid(x) or 0)) for x in self.bases)
-            max_inv = m.max_inventory_usd
-            if total_inv >= self.cfg.risk.max_total_inventory_usd:
-                max_inv = min(max_inv, abs(self.inventory(b) * mid))
-            target = target_quotes(
-                mid, q.offset_bps, m.size_usd_per_side, self.inventory(b), max_inv, q.skew_bps_per_1k,
-                Decimal(meta["quoteIncrement"]), Decimal(meta["baseIncrement"]),
-                min_size=self.lighter_markets[b].min_hedge_size(mid),
-            )
-            if b not in self.dirty and not needs_requote(self.current[b], target, mid, q.band_bps, q.requote_threshold_bps):
-                continue
-            if self.live and self.bucket.available() < REQUOTE_COST + 1:
-                continue
-            await self.place(b, target)
+            try:
+                await self._quote_market(b, now)
+            except Exception:
+                log.exception("%s 호가 루프 오류 (계속 진행)", b)
 
-    async def pull_market(self, b: str, reason: str) -> None:
+    async def _quote_market(self, b: str, now: float) -> None:
+        q = self.cfg.quoting
+        mid = self.ondo_mid(b)
+        blocked = self.killed or self.paused or (mid is None and "no_quote") or self.market_block_reason(b, now)
+        if blocked:
+            if self.current[b] is not None:
+                await self.pull_market(b, str(blocked))
+            return
+        m = self.mcfg[b]
+        meta = self.ondo_meta[b]
+        total_inv = sum(abs(self.inventory(x) * (self.ondo_mid(x) or 0)) for x in self.bases)
+        max_inv = m.max_inventory_usd
+        if total_inv >= self.cfg.risk.max_total_inventory_usd:
+            max_inv = min(max_inv, abs(self.inventory(b) * mid))
+        target = target_quotes(
+            mid, q.offset_bps, m.size_usd_per_side, self.inventory(b), max_inv, q.skew_bps_per_1k,
+            Decimal(meta["quoteIncrement"]), Decimal(meta["baseIncrement"]),
+            min_size=self.lighter_markets[b].min_hedge_size(mid),
+        )
+        unknown = self.current[b] is UNKNOWN_QUOTES
+        if not unknown and b not in self.dirty and not needs_requote(
+            self.current[b], target, mid, q.band_bps, q.requote_threshold_bps
+        ):
+            return
+        if self.live and self.bucket.available() < REQUOTE_COST + 1:
+            return
+        await self.place(b, target)
+
+    async def pull_market(self, b: str, reason: str) -> bool:
+        """한 마켓의 호가를 내린다. 실패하면 추적을 남겨 다음 루프에서 다시 시도한다."""
         log.info("%s 호가 내림: %s", b, reason)
+        self.requests_sent += 1
         if self.live:
             try:
                 await self.ondo_rest.cancel_all(self.ondo_meta[b]["market"])
             except Exception as e:
-                log.error("%s cancel 실패: %r", b, e)
-        self.requests_sent += 1
+                log.error("%s cancel 실패, 다음 루프에서 다시 시도: %r", b, e)
+                self.ledger.record_event("engine", "cancel_failed", f"{b} {e!r}"[:200])
+                return False
         self.current[b] = None
+        return True
 
     async def place(self, b: str, target: TargetQuotes) -> None:
         market = self.ondo_meta[b]["market"]
@@ -248,14 +275,16 @@ class Engine:
             return
         try:
             await self.ondo_rest.cancel_all(market)
+            self.current[b] = None
             payload = to_order_payloads(market, target)
             if not payload:
-                self.current[b] = None
                 return
             added, failed = await self.ondo_rest.create_batch(payload)
         except Exception as e:
+            # 요청이 거래소에 닿았는지 모른다. 비어 있다고 보지 않고 "확인 필요"로 남겨
+            # 다음 재호가나 정지 때 마켓 단위 취소부터 하게 한다.
             log.error("%s 호가 실패: %r", b, e)
-            self.current[b] = None
+            self.current[b] = UNKNOWN_QUOTES
             return
         bid = ask = None
         for o in added:
@@ -288,76 +317,96 @@ class Engine:
                 min_usd = self.lighter_markets[b].min_hedge_size(mid) * mid
                 if unhedged >= min_usd:
                     st.unhedged_since = st.unhedged_since or now
-                    await self.hedger.hedge(b, self.lighter_mid(b))
+                    try:
+                        await self.hedger.hedge(b, self.lighter_mid(b))
+                    except Exception:
+                        # Hedger.hedge는 예외를 밖으로 내지 않게 만들었지만, 만약을 위해 루프는 절대 죽지 않게 한다
+                        log.exception("%s 헷지 오류 (다음 대사에서 다시 시도)", b)
+                        st.consecutive_failures += 1
                 else:
                     st.unhedged_since = None
 
     async def risk_loop(self) -> None:
-        r = self.cfg.risk
         while not self.stop.is_set():
             await asyncio.sleep(1.0)
-            now = time.time()
-            ws_ok = (self.ondo_ws.connected and self.lighter_ws.connected
-                     and self.ondo_ws.stale_for(now) < 65 and self.lighter_ws.stale_for(now) < 65)
-            self.ws_bad_since = None if ws_ok else (self.ws_bad_since or now)
-            silent = 0.0 if self.ws_bad_since is None else now - self.ws_bad_since
-            if not self.live:
-                self.paused = f"시세 WS 이상 {silent:.0f}초" if silent > r.ws_stale_sec else None
-                continue
-            mids = {b: self.lighter_mid(b) or self.ondo_mid(b) or Decimal(0) for b in self.bases}
-            decision = evaluate(
-                RiskInputs(
-                    now=now,
-                    unhedged_usd={b: self.hedger.unhedged_usd(b, mids[b]) for b in self.bases},
-                    unhedged_since={b: self.hedger.states[b].unhedged_since for b in self.bases},
-                    hedge_failures={b: self.hedger.states[b].consecutive_failures for b in self.bases},
-                    public_ws_silent_sec=silent,
-                    private_ws_up=self.private_ws.ready,
-                    equity_start=self.equity_start,
-                    equity_now=self.equity_now,
-                    ondo_margin_usage=self.ondo_margin_usage,
-                ),
-                r.max_unhedged_usd, r.max_unhedged_sec, r.ws_stale_sec, r.daily_loss_limit_usd, r.max_margin_usage,
-            )
-            if decision.kill_reason:
-                await self.kill(decision.kill_reason)
-            if decision.pause_reason != self.paused:
-                if decision.pause_reason:
-                    log.warning("PAUSE: %s", decision.pause_reason)
-                    self.ledger.record_event("risk", "pause", decision.pause_reason)
-                elif self.paused:
-                    log.info("RESUME (%s 해소)", self.paused)
-                    self.ledger.record_event("risk", "resume", self.paused)
-                self.paused = decision.pause_reason
+            try:
+                await self._risk_tick()
+            except Exception:
+                log.exception("위험 판단 오류 -> 안전을 위해 정지")
+                await self.kill("위험 판단 루프 오류")
+
+    async def _risk_tick(self) -> None:
+        r = self.cfg.risk
+        now = time.time()
+        ws_ok = (self.ondo_ws.connected and self.lighter_ws.connected
+                 and self.ondo_ws.stale_for(now) < 65 and self.lighter_ws.stale_for(now) < 65)
+        self.ws_bad_since = None if ws_ok else (self.ws_bad_since or now)
+        silent = 0.0 if self.ws_bad_since is None else now - self.ws_bad_since
+        if not self.live:
+            self.paused = f"시세 WS 이상 {silent:.0f}초" if silent > r.ws_stale_sec else None
+            return
+        mids = {b: self.lighter_mid(b) or self.ondo_mid(b) or Decimal(0) for b in self.bases}
+        decision = evaluate(
+            RiskInputs(
+                now=now,
+                unhedged_usd={b: self.hedger.unhedged_usd(b, mids[b]) for b in self.bases},
+                unhedged_since={b: self.hedger.states[b].unhedged_since for b in self.bases},
+                hedge_failures={b: self.hedger.states[b].consecutive_failures for b in self.bases},
+                public_ws_silent_sec=silent,
+                private_ws_up=self.private_ws.ready,
+                equity_start=self.equity_start,
+                equity_now=self.equity_now,
+                ondo_margin_usage=self.ondo_margin_usage,
+            ),
+            r.max_unhedged_usd, r.max_unhedged_sec, r.ws_stale_sec, r.daily_loss_limit_usd, r.max_margin_usage,
+        )
+        if decision.kill_reason:
+            await self.kill(decision.kill_reason)
+        if decision.pause_reason != self.paused:
+            if decision.pause_reason:
+                log.warning("PAUSE: %s", decision.pause_reason)
+                self.ledger.record_event("risk", "pause", decision.pause_reason)
+            elif self.paused:
+                log.info("RESUME (%s 해소)", self.paused)
+                self.ledger.record_event("risk", "resume", self.paused)
+            self.paused = decision.pause_reason
 
     async def record_loop(self) -> None:
         st = self.cfg.storage
-        last_equity = last_basis = last_status = 0.0
+        self._last = {"equity": 0.0, "basis": 0.0, "status": 0.0}
         while not self.stop.is_set():
             await asyncio.sleep(st.quote_snapshot_sec)
-            now = time.time()
-            for b in self.bases:
-                cur, mid = self.current[b], self.ondo_mid(b)
-                if cur is None or mid is None:
-                    continue
-                for side, s in (("buy", cur.bid), ("sell", cur.ask)):
-                    if s is not None:
-                        self.ledger.record_quote(now, b, side, s.price, s.size, mid, self.cfg.quoting.band_bps,
-                                                 st.quote_snapshot_sec)
-            if now - last_basis >= st.basis_sample_sec:
-                for s_ in self.board.states.values():
-                    self.ledger.record_sample(s_, now)
-                last_basis = now
-            self.ledger.commit()
-            if self.live and now - last_equity >= 60:
-                try:
-                    await self.update_equity()
-                    last_equity = now
-                except Exception as e:
-                    log.warning("자산 조회 실패: %r", e)
-            if now - last_status >= 60:
-                last_status = now
-                log.info(self.status_line(now))
+            try:
+                await self._record_tick()
+            except Exception:
+                log.exception("기록 루프 오류 (계속 진행)")
+
+    async def _record_tick(self) -> None:
+        st = self.cfg.storage
+        last = self._last
+        now = time.time()
+        for b in self.bases:
+            cur, mid = self.current[b], self.ondo_mid(b)
+            if cur is None or mid is None:
+                continue
+            for side, s in (("buy", cur.bid), ("sell", cur.ask)):
+                if s is not None:
+                    self.ledger.record_quote(now, b, side, s.price, s.size, mid, self.cfg.quoting.band_bps,
+                                             st.quote_snapshot_sec)
+        if now - last["basis"] >= st.basis_sample_sec:
+            for s_ in self.board.states.values():
+                self.ledger.record_sample(s_, now)
+            last["basis"] = now
+        self.ledger.commit()
+        if self.live and now - last["equity"] >= 60:
+            try:
+                await self.update_equity()
+                last["equity"] = now
+            except Exception as e:
+                log.warning("자산 조회 실패: %r", e)
+        if now - last["status"] >= 60:
+            last["status"] = now
+            log.info(self.status_line(now))
 
     def status_line(self, now: float) -> str:
         mins = max((now - self.started) / 60, 1e-9)
@@ -415,7 +464,8 @@ class Engine:
             if loop_tasks:
                 await asyncio.gather(*loop_tasks, return_exceptions=True)
             log.info("종료: Ondo 호가 전부 취소 (헷지된 포지션은 유지)")
-            await self.cancel_all_quotes()
+            if not await self.cancel_all_quotes(attempts=3):
+                log.error("종료 중 Ondo 호가 취소 3회 실패. 데드맨 스위치가 약 30초 뒤 취소하지만, Ondo 앱에서 직접 확인할 것")
             for ws in (self.ondo_ws, self.lighter_ws, self.private_ws):
                 if ws is not None:
                     ws.stop()
@@ -446,3 +496,8 @@ class Engine:
         if not self.private_ws.logged_in:
             raise RuntimeError("Ondo 비공개 WS 로그인 실패 (키와 IP 화이트리스트 확인)")
         raise RuntimeError("Ondo 데드맨 스위치 활성화 확인 실패 (로그에서 subscribed 응답 확인)")
+
+
+def _log_task_error(task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        log.error("백그라운드 작업 오류: %r", task.exception())
