@@ -21,7 +21,9 @@ quoting:
   offset_bps: 18                 # 중간가에서 호가까지 거리
   requote_threshold_bps: 6
   skew_bps_per_1k: 2             # 재고 1,000달러당 호가를 미는 정도
-  max_basis_bps: 30              # Ondo와 Lighter 중간가 괴리가 이보다 크면 호가 중단
+  basis_deviation_bps: 15        # 괴리가 최근 중앙값에서 이만큼 벗어나면 그 마켓 호가 중단
+  basis_window_sec: 3600         # 중앙값을 계산하는 기간
+  basis_sanity_bps: 100          # 괴리 자체가 이보다 크면 다른 자산으로 보고 제외 (예: OPENAI)
   quote_when_underlying_closed: false
   inventory_mode: flatten        # flatten | hold_for_funding
 
@@ -53,7 +55,17 @@ markets:                         # 1주차 후보. ondo_depth_probe.py 결과로
     size_usd_per_side: 750
     max_inventory_usd: 2000
 
+market_data:                     # 시세 수신용 공개 엔드포인트. 읽기 전용이라 메인넷을 쓴다
+  ondo_rest_url: https://api.ondoperps.xyz
+  ondo_ws_url: wss://api.ondoperps.xyz/ws
+  lighter_rest_url: https://mainnet.zklighter.elliot.ai
+  lighter_ws_url: wss://mainnet.zklighter.elliot.ai/stream?readonly=true
+  ondo_ping_sec: 30              # Ondo는 180초 무응답이면 끊는다
+  lighter_ping_sec: 60           # Lighter는 2분 무응답이면 끊는다
+
 storage:
   sqlite_path: data/olbot.sqlite
+  log_path: data/olbot.log
   quote_snapshot_sec: 30
   band_depth_sec: 300
+  basis_sample_sec: 10           # watch가 괴리를 기록하는 간격

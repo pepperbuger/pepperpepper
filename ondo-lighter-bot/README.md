@@ -13,12 +13,37 @@ Ondo Perps에 지정가(post-only) 호가를 걸어 USDC 리워드와 포인트�
 | [.env.example](.env.example) | 비밀값 예시 |
 | [scripts/ondo_depth_probe.py](scripts/ondo_depth_probe.py) | 마켓 선별용 측정기. 지금 바로 실행 가능, API 키 불필요 |
 
-## 집에서 시작하는 법
+## 진행 상황
 
-1. 저장소를 받고 이 폴더로 이동한다.
-2. 마켓 상태부터 본다: `python3 scripts/ondo_depth_probe.py --csv depth.csv`
+| 단계 | 상태 |
+|---|---|
+| 1. 골격과 설정 | 완료 |
+| 2. 시세 수신과 괴리 기록 | 완료 |
+| 3. Ondo 인증 ~ 8. 소액 실운영 | 집에서 진행 |
+
+## 설치와 실행 (1~2단계)
+
+Python 3.11 이상이 필요하다. 윈도우는 `.venv/bin/` 대신 `.venv\Scripts\`를 쓴다.
+
+```
+python -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+cp config.example.yaml config.yaml
+cp .env.example .env
+
+.venv/bin/python -m pytest                                  # 테스트
+.venv/bin/python -m olbot check-config --online             # 1단계: 설정 검증 + 마켓 존재 확인
+.venv/bin/python -m olbot watch --markets LIT,NEAR,ENA,SOL,XRP --duration 3600   # 2단계
+```
+
+`watch`는 주문을 보내지 않는다. 두 거래소 공개 시세만 받아서 `data/olbot.sqlite`에 괴리를 기록하고, 끝나면 마켓별 요약을 출력한다.
+
+## 집에서 이어가는 법
+
+1. 저장소를 받고 이 폴더로 이동해서 위 설치를 한다.
+2. 마켓 상태를 본다: `python3 scripts/ondo_depth_probe.py --csv depth.csv`
 3. Claude Code를 이 폴더에서 열고 이렇게 요청한다:
-   "docs/SPEC.md의 8. 구현 순서 1단계부터 진행해줘. 각 단계 완료 기준을 통과하면 멈추고 알려줘."
+   "docs/SPEC.md의 8. 구현 순서 3단계부터 진행해줘. 각 단계 완료 기준을 통과하면 멈추고 알려줘."
 4. 3단계(Ondo 인증)와 5단계(Lighter 헷지) 전에 API 키를 만든다. 키 권한과 보관 방법은 SPEC 5번 6항을 따른다.
 5. 메인넷 주문은 8단계에서만, 소액으로 시작한다.
 

@@ -36,6 +36,14 @@
 - WS는 2분 안에 한 번 이상 ping, 끊기면 자동 재연결과 재구독. 호가창 델타는 `begin_nonce`가 이전 nonce와 같은지 확인하고 아니면 재구독한다.
 - Standard 계정은 분당 60 요청이다. 429/405를 받으면 물러난다.
 
+## 개발 명령
+
+- 설치: `python -m venv .venv && .venv/bin/pip install -e '.[dev]'`
+- 테스트: `.venv/bin/python -m pytest`
+- 설정 검증: `.venv/bin/python -m olbot check-config --online`
+- 시세 확인(주문 없음): `.venv/bin/python -m olbot watch --duration 600`
+- 1~2단계는 완료됐다. 새 WS 클라이언트는 `wsbase.ReconnectingWS`를 상속하고, 메시지 파싱은 `market.py`처럼 순수 함수로 분리해서 실제로 받은 메시지로 테스트한다.
+
 ## 코드 규칙
 
 - Python 3.11+, asyncio. 의존성은 최소로: `lighter-sdk`, `websockets`, `httpx`, `pyyaml`, `python-dotenv`, 테스트는 `pytest`, `pytest-asyncio`.

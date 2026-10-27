@@ -73,6 +73,7 @@
 | 얇음, 헷지 가능 | LIT 2.7만, NEAR 2.7만, MSTR 4만, MRNA 6만, CBRS 11만, HOOD 15만, COIN 19만, META 20만, ONDO 22만, XRP 27만, ENA 34만 |
 
 - 같은 심볼이라도 같은 기초자산이 아닐 수 있다. OPENAI는 Lighter 최근가가 Ondo 중간가보다 약 477bps, ZHIPU는 약 -112bps 차이가 났다. 가격 괴리 검사를 통과하지 못하는 마켓은 호가를 걸지 않는다. 주식은 미국 장 마감 시간이라 최근가가 낡았을 수 있으니, 비교는 양쪽 실시간 중간가로 한다.
+- 정상 마켓에도 평소 괴리가 꾸준히 있다. 2026-10-27 10:40 UTC 실시간 중간가 기준으로 Lighter가 LIT 약 32bps, XRP 약 17bps, SOL 약 16bps, ENA 약 6bps, NEAR 약 2bps 비쌌고, 1분 동안 거의 변하지 않았다. 헷지 손익을 흔드는 건 괴리의 크기가 아니라 진입과 청산 사이의 변화이므로, 괴리 검사는 "최근 중앙값에서 벗어난 정도"로 한다(3번 1항).
 
 ## 2. 전체 구조
 
@@ -81,26 +82,32 @@ Python 3.11+, asyncio 단일 프로세스.
 ```
 ondo-lighter-bot/
   CLAUDE.md               Claude Code 작업 규칙
+  pyproject.toml          패키지와 의존성 (pip install -e '.[dev]')
   config.example.yaml     설정 예시 (config.yaml로 복사)
   .env.example            비밀값 예시 (.env로 복사, 커밋 금지)
   docs/SPEC.md            이 문서
   scripts/
     ondo_depth_probe.py   마켓 선별용 읽기 전용 측정기 (완성)
   src/olbot/
-    main.py               실행 진입점, 작업 감독, 종료 처리
-    config.py             설정과 비밀값 로딩, 검증
-    ondo/rest.py          HMAC 서명, 초당 1회 토큰 버킷, 주문/취소/잔고/포지션
-    ondo/ws.py            로그인, 공개/비공개 채널, 데드맨 스위치 하트비트, 재연결
-    lighter/client.py     SDK 래퍼: IOC 헷지 주문, 포지션, 논스 관리
-    lighter/ws.py         호가창 구독(스냅샷+델타), 계정 이벤트
-    market.py             양쪽 실시간 중간가, 괴리(bps), band 안 호가 물량
-    quoter.py             호가 가격과 수량 계산, 재호가 판단
-    hedger.py             체결 이벤트 -> Lighter 헷지, 주기적 포지션 대사
-    risk.py               킬 스위치 규칙, 노출 한도, 증거금 감시
-    ledger.py             SQLite 기록
-    report.py             주간 리포트
+    main.py               실행 진입점: check-config, watch 명령 (완성)
+    config.py             설정과 비밀값 로딩, 검증 (완성)
+    wsbase.py             재연결, ping, 연결 이벤트를 처리하는 WS 공통 클래스 (완성)
+    markets.py            기초자산 -> Ondo 마켓 이름, Lighter market_id 연결 (완성)
+    market.py             양쪽 최우선 호가, 괴리(bps), 괴리 중앙값 추적과 판정 (완성)
+    watch.py              2단계: 시세 수신과 괴리 기록 실행기 (완성)
+    ondo/ws.py            공개 채널 topOfBooksPerps (완성). 로그인, 비공개 채널, 데드맨 스위치는 3단계
+    ondo/rest.py          3단계: HMAC 서명, 초당 1회 토큰 버킷, 주문/취소/잔고/포지션
+    lighter/ws.py         공개 채널 ticker/{market_id} (완성). 계정 이벤트는 5단계
+    lighter/client.py     5단계: SDK 래퍼, IOC 헷지 주문, 포지션, 논스 관리
+    quoter.py             4단계: 호가 가격과 수량 계산, 재호가 판단
+    hedger.py             5단계: 체결 이벤트 -> Lighter 헷지, 주기적 포지션 대사
+    risk.py               6단계: 킬 스위치 규칙, 노출 한도, 증거금 감시
+    ledger.py             SQLite 기록. 지금은 basis_samples, events 테이블만 (나머지는 각 단계에서 추가)
+    report.py             7단계: 주간 리포트
   tests/                  pytest
 ```
+
+Lighter 시세는 호가창 전체(스냅샷+델타) 대신 최우선 호가만 주는 `ticker/{market_id}` 채널을 쓴다. 공정가와 괴리 계산에는 최우선 호가로 충분하고, 델타 연속성 관리가 필요 없다. 공개 시세는 `?readonly=true`로 접속한다.
 
 데이터 흐름:
 1. `market.py`가 Ondo `topOfBooksPerps`와 Lighter 호가창을 받아 마켓별 공정가와 괴리를 갱신한다.
@@ -113,7 +120,10 @@ ondo-lighter-bot/
 
 마켓별 설정: `offset_bps`, `size_usd_per_side`, `max_inventory_usd`.
 
-1. 공정가 = Ondo 중간가. 단 Lighter 중간가와의 괴리가 `max_basis_bps`(기본 30)를 넘으면 그 마켓은 호가를 내린다.
+1. 공정가 = Ondo 중간가. 괴리(Lighter 중간가 / Ondo 중간가 - 1)를 마켓별로 추적해서 아래 경우 그 마켓은 호가를 내린다(`market.basis_status`).
+   - 괴리가 최근 `basis_window_sec`(기본 1시간) 중앙값에서 `basis_deviation_bps`(기본 15) 이상 벗어남: 두 거래소가 따로 움직이는 중이라 헷지가 불안하다.
+   - 괴리 절대값이 `basis_sanity_bps`(기본 100)를 넘음: 같은 심볼이라도 다른 자산으로 본다(OPENAI 사례).
+   - 처음에는 괴리 크기 자체를 기준(30bps)으로 하려 했지만, 정상 마켓인 LIT의 평소 괴리가 약 32bps라 이 방식은 버렸다.
 2. 매수 호가 = 공정가 x (1 - offset_bps/1e4), 매도 호가 = 공정가 x (1 + offset_bps/1e4). 기본 offset 18bps. 25bps 안쪽에 들어가되, 가격이 조금 움직여도 band를 벗어나지 않게 여유를 둔다.
 3. 가격은 `quoteIncrement`, 수량은 `baseIncrement`에 맞춰 내림한다. 항상 `postOnly=true`, `timeInForce=GTC`.
 4. 재고 기울이기: 순포지션이 롱이면 두 호가를 `skew_bps_per_1k` x (재고 USD/1000)만큼 아래로 내린다. 숏이면 위로 올린다. `|재고| >= max_inventory_usd`이면 재고를 늘리는 쪽 호가는 걸지 않는다.
@@ -148,7 +158,7 @@ ondo-lighter-bot/
    - Ondo 또는 Lighter WS 끊김 > 10초
    - Lighter 주문 오류 연속 3회
    - 어느 한쪽 증거금 사용률 > `max_margin_usage`(기본 0.5)
-   - 마켓 괴리 > `max_basis_bps`
+   - 마켓 괴리 판정이 `deviation` 또는 `sanity` (해당 마켓만 중단)
    - 당일 실현+미실현 손익 < `-daily_loss_limit_usd`(기본 100)
 5. 레버리지: 양쪽 3배 고정. 시작할 때 Ondo `POST /v1/perps/leverage`로 설정하고 확인.
 6. 키 관리:
@@ -188,7 +198,7 @@ SQLite 테이블(`data/olbot.sqlite`):
 마켓 선정 기준(probe 결과로 판단):
 1. Lighter 24시간 거래량 500만 달러 이상(헷지 유동성)
 2. Ondo band 안 물량이 얇을 것(내 몫이 커짐)
-3. 양쪽 실시간 중간가 괴리 30bps 이하
+3. 양쪽 실시간 중간가 괴리가 안정적일 것 (`watch` 요약의 dev_p95가 작을수록 좋다)
 4. 1주차는 24시간 거래되는 코인 위주. 주식은 2주차부터.
 
 1주차 후보: LIT, NEAR, ENA, XRP 중 3개 + 비교용 SOL 1개. 한쪽당 호가 500~1,000달러, 마켓당 최대 재고 2,000달러, 전체 최대 재고 5,000달러.
@@ -202,8 +212,8 @@ SQLite 테이블(`data/olbot.sqlite`):
 
 각 단계는 완료 기준을 만족해야 다음으로 간다.
 
-1. 골격과 설정: `pyproject.toml`, `config.py`, 로깅, `.env` 로딩. 완료 기준: `python -m olbot --check-config` 통과.
-2. 시세 수신(키 불필요): Ondo `topOfBooksPerps` + Lighter 호가창 구독, 재연결, 공정가와 괴리 계산. 완료 기준: 1시간 끊김 없이 마켓 5개 괴리를 기록.
+1. [완료] 골격과 설정: `pyproject.toml`, `config.py`, 로깅, `.env` 로딩. 완료 기준: `python -m olbot check-config` 통과. `--online`을 붙이면 설정한 마켓이 두 거래소에 실제로 있는지도 확인한다.
+2. [완료] 시세 수신(키 불필요): Ondo `topOfBooksPerps` + Lighter `ticker` 구독, 재연결, 공정가와 괴리 계산. 완료 기준: 1시간 끊김 없이 마켓 5개 괴리를 기록. 실행: `python -m olbot watch --markets LIT,NEAR,ENA,SOL,XRP --duration 3600`. 결과는 README의 "2단계 검증 결과"에 있다.
 3. Ondo 인증: HMAC REST 서명, WS 로그인, 잔고/포지션 조회, 데드맨 스위치. 완료 기준: 샌드박스에서 잔고 조회 성공, 단위 테스트로 서명 문자열 검증.
 4. dry_run 호가기: 호가 계산, 재호가 판단, 요청 예산 토큰 버킷. 완료 기준: 24시간 dry_run에서 분당 요청 50회를 넘지 않음.
 5. Lighter 헷지: SDK로 IOC 주문, 논스 관리, 체결 확인. 완료 기준: 테스트넷에서 주문, 체결 확인, 실패 재시도 테스트.
@@ -231,6 +241,7 @@ SQLite 테이블(`data/olbot.sqlite`):
 - 한국 거주자의 Ondo 리워드와 포인트 수령 자격.
 - 각 마켓의 Ondo 펀딩 정산 주기(`/v1/markets`의 `fundingIntervalDivisions` 의미).
 - Ondo와 Lighter의 같은 심볼이 같은 기초자산인지, 마켓별 가격 산정 문서로 확인.
+- 평소 괴리(LIT 약 32bps 등)가 왜 생기는지. 펀딩 차이나 지수 산정 방식 차이라면 하루 이상 `watch`를 돌려 시간대별로 얼마나 움직이는지 본다. 괴리가 크게 움직이는 마켓은 헷지 비용이 커진다.
 
 ## 출처
 
