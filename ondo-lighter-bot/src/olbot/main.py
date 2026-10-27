@@ -150,6 +150,96 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_pending(args) -> int:
+    """미확정 헷지 기록 보기, 주문 상태 확인(조회만), 사람이 확인한 뒤 정리."""
+    import datetime
+
+    from olbot.ledger import Ledger, pending_scope
+
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as e:
+        print(f"설정 오류: {e}")
+        return 2
+    secrets = load_secrets(args.env)
+    if not secrets.lighter_account_index:
+        print(".env에 LIGHTER_ACCOUNT_INDEX가 필요하다")
+        return 2
+    scope = pending_scope(cfg.lighter.base_url, int(secrets.lighter_account_index))
+    ledger = Ledger(cfg.storage.sqlite_path)
+    try:
+        pending = ledger.load_pending_hedges(scope)
+        if args.action == "list" or (args.action == "check" and not pending):
+            if not pending:
+                print("미확정 헷지 없음")
+            for base, p in sorted(pending.items()):
+                sent = datetime.datetime.fromtimestamp(p.sent_ts).strftime("%Y-%m-%d %H:%M:%S")
+                print(f"{base:6} {'매도' if p.is_sell else '매수'} {p.size}  전송 {sent}  "
+                      f"주문번호 {p.client_order_index if p.client_order_index is not None else '없음(예전 기록)'}  "
+                      f"전송 전 Lighter 포지션 {p.lighter_pos_before}")
+            return 0
+        if args.action == "check":
+            return asyncio.run(_check_pending(cfg, secrets, pending))
+        if args.action == "clear":
+            base = (args.base or "").upper()
+            if base not in pending:
+                print(f"{base} 미확정 기록 없음")
+                return 1
+            if not args.yes:
+                print("Lighter 앱에서 이 주문의 실제 체결 여부와 현재 포지션을 확인한 뒤 --yes를 붙여 다시 실행한다.")
+                print("확인 없이 지우면 봇이 같은 헷지를 다시 보낼 수 있다.")
+                return 1
+            ledger.save_pending_hedge(scope, base, None)
+            ledger.record_event("operator", "pending_cleared", f"{base} {pending[base]}")
+            print(f"{base} 미확정 기록을 지웠다. 다음 실행부터 봇이 실제 포지션 차이로 다시 헷지한다.")
+            return 0
+    finally:
+        ledger.close()
+    return 2
+
+
+async def _check_pending(cfg, secrets, pending) -> int:
+    from olbot.lighter.client import LighterTrader
+
+    t = LighterTrader(cfg.lighter.base_url, int(secrets.lighter_account_index),
+                      int(secrets.lighter_api_key_index), secrets.lighter_api_key_private_key)
+    await t.connect()
+    try:
+        for base, p in sorted(pending.items()):
+            if p.client_order_index is None:
+                print(f"{base:6} 주문번호 없는 예전 기록: Lighter 앱에서 직접 확인 후 pending clear")
+                continue
+            os = await t.order_status(p.client_order_index)
+            if os is None:
+                print(f"{base:6} 주문 {p.client_order_index}: 거래소에서 찾지 못함 (아직 반영 전이거나 전송되지 않음)")
+            else:
+                print(f"{base:6} 주문 {p.client_order_index}: {os.status}, 체결 {os.filled}/{os.initial}"
+                      + (" -> 최종 상태. 봇을 다시 켜면 자동으로 정리된다" if os.terminal else " -> 아직 진행 중"))
+    finally:
+        await t.close()
+    return 0
+
+
+def cmd_verify_keys(args) -> int:
+    from olbot.verify import verify_keys
+
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as e:
+        print(f"설정 오류: {e}")
+        return 2
+    secrets = load_secrets(args.env)
+    missing = [k for k, v in secrets.present().items() if not v]
+    if missing:
+        print(f".env에 비어 있는 값: {missing}")
+        return 2
+    print(f"Ondo {cfg.ondo.rest_url}, Lighter {cfg.lighter.base_url} 에 조회만 한다 (주문 없음)")
+    results = asyncio.run(verify_keys(cfg, secrets))
+    for name, ok, detail in results:
+        print(f"  [{'OK' if ok else '실패'}] {name}: {detail}")
+    return 0 if all(ok for _, ok, _ in results) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="olbot", description="Ondo + Lighter 유동성 리워드 봇")
     p.add_argument("--config", default="config.yaml", help="설정 파일 (기본 config.yaml)")
@@ -178,6 +268,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Ondo 앱에서 확인한 주간 리워드 기록. 예: 2026-10-27 2026-11-02 3.21 1500")
     rp.add_argument("--note", help="리워드 메모")
     rp.set_defaults(func=cmd_report)
+
+    vk = sub.add_parser("verify-keys", help="실제 키로 인증만 확인 (조회만, 주문 없음)")
+    vk.set_defaults(func=cmd_verify_keys)
+
+    pd = sub.add_parser("pending", help="미확정 헷지 주문 보기/상태 확인/정리 (주문 없음)")
+    pd.add_argument("action", choices=["list", "check", "clear"],
+                    help="list: 기록 보기, check: Lighter에서 주문 상태 조회(조회만), clear: 사람이 확인한 뒤 기록 삭제")
+    pd.add_argument("base", nargs="?", help="clear할 마켓 (예: LIT)")
+    pd.add_argument("--yes", action="store_true", help="Lighter 앱에서 확인했다는 표시. clear에 필요")
+    pd.set_defaults(func=cmd_pending)
     return p
 
 

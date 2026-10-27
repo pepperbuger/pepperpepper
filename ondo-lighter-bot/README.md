@@ -48,10 +48,12 @@ cp .env.example .env
 cp config.live-500.example.yaml config.yaml
 cp .env.example .env                      # Ondo, Lighter 키 입력
 .venv/bin/python -m olbot check-config --online
+.venv/bin/python -m olbot verify-keys                 # 실제 키 인증 확인 (조회만, 주문 없음)
 .venv/bin/python -m olbot run --duration 600          # dry_run: 주문 없이 10분, 호가 계산만
 .venv/bin/python -m olbot run --live                  # 실운영. Ctrl+C로 종료하면 Ondo 호가 전부 취소
 .venv/bin/python -m olbot report --hours 24           # 결과 보기
 .venv/bin/python -m olbot report --add-reward 2026-10-27 2026-11-02 1.23 500   # 수요일 리워드 확인 후 기록
+.venv/bin/python -m olbot pending list|check          # 결과를 모르는 헷지 주문 보기 / Lighter에 최종 상태 조회
 ```
 
 봇이 하는 일:

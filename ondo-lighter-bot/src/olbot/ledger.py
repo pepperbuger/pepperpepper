@@ -49,9 +49,15 @@ CREATE TABLE IF NOT EXISTS pending_hedges (
     scope TEXT NOT NULL, base TEXT NOT NULL,
     size TEXT NOT NULL, is_sell INTEGER NOT NULL,
     lighter_pos_before TEXT NOT NULL, sent_ts REAL NOT NULL,
+    client_order_index INTEGER,
     PRIMARY KEY (scope, base)
 );
 """
+
+
+def pending_scope(lighter_base_url: str, account_index: int) -> str:
+    """미확정 헷지 기록의 범위: 거래소 주소 + 계정 번호. 테스트넷과 메인넷, 계정끼리 섞이지 않게 한다."""
+    return f"{lighter_base_url.rstrip('/')}:account:{int(account_index)}"
 
 
 class Ledger:
@@ -61,6 +67,14 @@ class Ledger:
             path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(path))
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """예전 DB에 없는 열을 추가한다. 미확정 기록은 지우면 안 되므로 테이블을 다시 만들지 않는다."""
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(pending_hedges)")}
+        if "client_order_index" not in cols:
+            self.db.execute("ALTER TABLE pending_hedges ADD COLUMN client_order_index INTEGER")
+            self.db.commit()
 
     def close(self) -> None:
         self.db.commit()
@@ -95,9 +109,11 @@ class Ledger:
             self.db.execute("DELETE FROM pending_hedges WHERE scope=? AND base=?", (scope, base))
         else:
             self.db.execute(
-                "INSERT OR REPLACE INTO pending_hedges VALUES (?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO pending_hedges"
+                " (scope, base, size, is_sell, lighter_pos_before, sent_ts, client_order_index)"
+                " VALUES (?,?,?,?,?,?,?)",
                 (scope, base, str(pending.size), int(pending.is_sell),
-                 str(pending.lighter_pos_before), pending.sent_ts),
+                 str(pending.lighter_pos_before), pending.sent_ts, pending.client_order_index),
             )
         self.db.commit()
 
@@ -105,10 +121,11 @@ class Ledger:
         from olbot.hedger import PendingHedge
 
         rows = self.db.execute(
-            "SELECT base,size,is_sell,lighter_pos_before,sent_ts FROM pending_hedges WHERE scope=?", (scope,)
+            "SELECT base,size,is_sell,lighter_pos_before,sent_ts,client_order_index"
+            " FROM pending_hedges WHERE scope=?", (scope,)
         ).fetchall()
-        return {base: PendingHedge(Decimal(size), bool(is_sell), Decimal(before), sent_ts)
-                for base, size, is_sell, before, sent_ts in rows}
+        return {base: PendingHedge(Decimal(size), bool(is_sell), Decimal(before), sent_ts, coi)
+                for base, size, is_sell, before, sent_ts, coi in rows}
 
     def record_fill(self, base: str, fill: dict, ondo_mid, lighter_mid) -> bool:
         """Ondo 체결 한 건. 같은 fill id가 다시 오면 무시하고 False."""

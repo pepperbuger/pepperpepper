@@ -59,6 +59,36 @@ def parse_account_positions(account: dict) -> dict[int, Decimal]:
     return out
 
 
+TERMINAL_FILLED = "filled"
+OPEN_STATUSES = {"in-progress", "pending", "open"}
+
+
+@dataclass(frozen=True)
+class OrderStatus:
+    """accountOrders 응답의 주문 한 건. 최종 상태면 filled가 그 주문의 확정 체결 수량이다."""
+    client_order_index: int
+    status: str
+    filled: Decimal
+    initial: Decimal
+
+    @property
+    def terminal(self) -> bool:
+        # filled 또는 canceled-* (canceled-too-much-slippage, canceled-not-enough-liquidity 등)
+        return self.status == TERMINAL_FILLED or self.status.startswith("canceled")
+
+
+def parse_order_status(order: dict) -> OrderStatus:
+    return OrderStatus(
+        client_order_index=int(order["client_order_index"]),
+        status=str(order.get("status") or ""),
+        filled=Decimal(str(order.get("filled_base_amount") or "0")),
+        initial=Decimal(str(order.get("initial_base_amount") or "0")),
+    )
+
+
+AUTH_TOKEN_TTL_SEC = 8 * 60  # SDK 기본 토큰은 10분짜리. 여유를 두고 8분마다 새로 만든다
+
+
 class LighterTrader:
     def __init__(self, base_url: str, account_index: int, api_key_index: int, private_key: str) -> None:
         self.base_url = base_url.rstrip("/")
@@ -67,6 +97,8 @@ class LighterTrader:
         self._private_key = private_key
         self.client = None
         self._last_coi = 0
+        self._auth_token: str | None = None
+        self._auth_token_ts = 0.0
 
     async def connect(self) -> None:
         import lighter  # 무거운 의존성이라 실제 거래할 때만 불러온다
@@ -91,14 +123,16 @@ class LighterTrader:
     async def positions(self) -> dict[int, Decimal]:
         return parse_account_positions(await self.account())
 
-    def _next_client_order_index(self) -> int:
+    def new_client_order_index(self) -> int:
+        """주문 전에 미리 정해서 미확정 기록에 함께 저장한다. 그래야 응답을 잃어도 이 번호로 결과를 찾는다."""
         coi = int(time.time() * 1000) % (2**48 - 1)
         if coi <= self._last_coi:
             coi = self._last_coi + 1
         self._last_coi = coi
         return coi
 
-    async def market_order(self, m: LighterMarket, size: Decimal, is_sell: bool, worst_price: Decimal) -> str | None:
+    async def market_order(self, m: LighterMarket, size: Decimal, is_sell: bool, worst_price: Decimal,
+                           client_order_index: int | None = None) -> str | None:
         """IOC 시장가 주문.
 
         - None: 거래소가 접수함 (체결 여부는 포지션으로 확인)
@@ -112,7 +146,7 @@ class LighterTrader:
         # SignerClient에 키를 하나만 등록했으므로 SDK가 그 키와 다음 논스를 고른다.
         _tx, resp, err = await self.client.create_market_order(
             market_index=m.market_id,
-            client_order_index=self._next_client_order_index(),
+            client_order_index=client_order_index if client_order_index is not None else self.new_client_order_index(),
             base_amount=base_amount,
             avg_execution_price=m.to_int_price(worst_price),
             is_ask=is_sell,
@@ -122,4 +156,28 @@ class LighterTrader:
         if resp is not None and getattr(resp, "code", 200) != 200:
             return f"code {resp.code}: {getattr(resp, 'message', '')}"
         log.info("lighter order accepted: %s %s %s worst=%s resp=%s", m.base, "sell" if is_sell else "buy", size, worst_price, resp)
+        return None
+
+    def _auth(self) -> str:
+        now = time.time()
+        if self._auth_token is None or now - self._auth_token_ts > AUTH_TOKEN_TTL_SEC:
+            token, err = self.client.create_auth_token_with_expiry(api_key_index=self.api_key_index)
+            if err:
+                raise RuntimeError(f"Lighter 인증 토큰 생성 실패: {err}")
+            self._auth_token, self._auth_token_ts = token, now
+        return self._auth_token
+
+    async def order_status(self, client_order_index: int) -> OrderStatus | None:
+        """client_order_index로 주문 최종 상태를 조회한다. 거래소에 없으면 None.
+
+        None은 "아직 반영 전"일 수도 있어서 미체결의 증거가 아니다. 조회 실패는 예외로 올린다.
+        """
+        url = (f"{self.base_url}/api/v1/accountOrders?account_index={self.account_index}"
+               f"&client_order_indexes={client_order_index}")
+        data = await get_json(url, headers={"authorization": self._auth()})
+        if int(data.get("code", 200)) != 200:
+            raise RuntimeError(f"accountOrders code {data.get('code')}: {data.get('message')}")
+        for order in data.get("orders") or []:
+            if int(order.get("client_order_index", -1)) == client_order_index:
+                return parse_order_status(order)
         return None

@@ -10,14 +10,14 @@ from dataclasses import dataclass
 from olbot.market import ondo_market_name
 
 
-def _get_json(url: str, timeout: float = 20.0) -> dict:
-    req = urllib.request.Request(url, headers={"User-Agent": "olbot/0.1"})
+def _get_json(url: str, timeout: float = 20.0, headers: dict | None = None) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "olbot/0.1", **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 
 
-async def get_json(url: str, timeout: float = 20.0) -> dict:
-    return await asyncio.to_thread(_get_json, url, timeout)
+async def get_json(url: str, timeout: float = 20.0, headers: dict | None = None) -> dict:
+    return await asyncio.to_thread(_get_json, url, timeout, headers)
 
 
 async def fetch_ondo_perps(rest_url: str) -> dict[str, dict]:

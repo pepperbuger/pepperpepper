@@ -29,6 +29,7 @@ Lighter (app.lighter.xyz)
 - 계정 번호(account index) 확인: 브라우저에서 아래 주소를 연다. `sub_accounts`의 첫 번째 `index`가 메인 계정이다.
   `https://mainnet.zklighter.elliot.ai/api/v1/accountsByL1Address?l1_address=내지갑주소`
 - 지갑 개인키는 봇에 넣지 않는다. 봇은 API 키의 개인키만 쓴다.
+- 예전에 받아둔 Lighter 키가 있으면 그대로 쓴다. 메인넷 키인지 테스트넷 키인지에 따라 `config.yaml`의 `lighter.base_url`과 `market_data.lighter_rest_url`을 같은 네트워크로 맞춘다(설정 예시는 메인넷). 계정 번호도 그 네트워크 기준이다.
 
 ## 3. 돈 넣기
 
@@ -46,7 +47,14 @@ cp .env.example .env
 
 ```
 .venv/bin/python -m olbot check-config --online    # "검증 통과"가 나와야 한다. 메인넷 경고는 정상
+.venv/bin/python -m olbot verify-keys              # 실제 키로 인증만 확인. 주문 없음, 데드맨도 켜지 않음
 ```
+
+`verify-keys`는 Ondo 잔고/포지션 조회, Ondo WS 로그인, Lighter 키 등록 확인과 계정 조회, Lighter 주문 조회 인증을 차례로 보고 각각 OK/실패를 찍는다. 전부 OK여야 다음으로 간다.
+- `HTTP 401 ip_not_permitted`: Ondo 키의 IP 화이트리스트에 지금 공인 IP가 없음
+- `HTTP 403 forbidden_country`: 접속 지역 차단 (미국 등). 한국 집 PC에서는 나오지 않아야 한다
+- `timestamp_too_far`: PC 시계가 틀림. 윈도우 시간 동기화
+- `key id not found`: 키 ID 오타
 
 ## 5. 처음 실행 순서
 
@@ -76,12 +84,22 @@ cp .env.example .env
 | 로그 | 뜻 | 할 일 |
 |---|---|---|
 | `PAUSE: ...` | WS 끊김, 포지션 조회 실패, 증거금 사용률 높음 등. 원인이 사라지면 자동 재개 | 지켜본다. 포지션 조회 실패가 길어지면 인터넷과 Lighter, Ondo 상태 확인 |
-| `send outcome unknown`, `헷지 주문 미확정` | 결과를 모르는 헷지. 같은 마켓의 추가 헷지를 막고 10초가 지나면 모든 Ondo 호가 일시정지 | 원래 Lighter 주문과 체결을 확인. 시간 경과/재시작으로 자동 해제하지 않음 |
+| `send outcome unknown`, `헷지 주문 미확정` | 결과를 모르는 헷지. 같은 마켓의 추가 헷지를 막고 10초가 지나면 모든 Ondo 호가 일시정지 | 봇이 주문 번호로 Lighter에 최종 상태를 계속 조회해서, 확정되면 스스로 풀고 재개한다. 오래 안 풀리면 `pending check`로 상태를 본다 |
 | `LIT 호가 내림: deviation` | 두 거래소 가격 차이가 평소보다 크게 벌어짐 | 지켜본다 |
 | `KILL: ...` | 헷지 안 된 노출 지속, 헷지 3회 실패, 자산 25달러 감소 | 원인 확인 후 재시작. Ondo와 Lighter 포지션이 서로 반대인지 앱에서 확인. 25달러는 정지 기준이라 실제 손실은 더 클 수 있다 |
 | `cancel 실패` | Ondo 취소 요청 실패. 봇이 다음 루프에서 다시 시도 | 반복되면 Ondo 앱에서 호가가 남아 있는지 확인 |
 
-미확정 헷지는 `storage.sqlite_path`의 `pending_hedges`에 전송 전에 저장되며, 재시작해도 같은 계정의 기록을 복원한다. 기록이 있는 마켓을 설정에서 빼면 시작을 거부한다. DB 삭제/교체로 우회하지 말고 기존 DB를 유지한다. 주문 수량 전부가 반영되면 대기를 해제하지만, 일부 체결이나 포지션 무변화는 원래 주문의 최종 상태를 증명하지 않는다. 현재 최종 주문 상태 조회 기능이 없으므로 이런 경우 자동으로 재전송/재개하지 않는다. 주문 상태를 확인하고 대사 기능을 보강해야 한다. 동일 계정/마켓에 다른 봇이나 수동 주문을 섞지 않는다.
+미확정 헷지는 `storage.sqlite_path`의 `pending_hedges`에 주문 번호(client_order_index)와 함께 전송 전에 저장되며, 재시작해도 같은 계정의 기록을 복원한다. 기록이 있는 마켓을 설정에서 빼면 시작을 거부한다. DB 삭제/교체로 우회하지 말고 기존 DB를 유지한다.
+
+미확정은 시간이 지나도 풀리지 않는다. 봇은 그 주문 번호로 Lighter `accountOrders`를 조회해서, 주문이 `filled` 또는 `canceled-*`로 끝났고 포지션이 그 체결 수량만큼 반영된 것까지 확인한 뒤에만 푼다. 일부 체결이나 미체결(가격 초과 취소 등)도 이렇게 확정되면 남은 양만 더 넓은 가격으로 다시 헷지하고, 다른 정지 사유가 없으면 호가를 자동 재개한다. 거래소에서 주문을 찾지 못하는 동안(아직 반영 전이거나 전송 안 됨)은 계속 기다린다.
+
+사람이 직접 확인할 때:
+```
+.venv/bin/python -m olbot pending list            # 미확정 기록 보기
+.venv/bin/python -m olbot pending check           # 주문 번호로 Lighter에 최종 상태 조회 (조회만)
+.venv/bin/python -m olbot pending clear LIT --yes # Lighter 앱에서 확인한 뒤에만. 확인 없이 지우면 중복 헷지 위험
+```
+`clear`가 필요한 경우는 주문 번호가 없는 예전 기록이거나, `check`에서 계속 "찾지 못함"이 나오는데 Lighter 앱에서 그 주문이 없다는 걸 확인한 경우뿐이다. 동일 계정/마켓에 다른 봇이나 수동 주문을 섞지 않는다(포지션 반영 확인이 틀어진다).
 
 ## 8. 문제가 생기면
 

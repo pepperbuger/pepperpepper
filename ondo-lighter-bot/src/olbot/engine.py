@@ -18,7 +18,7 @@ from decimal import Decimal
 
 from olbot.config import Config, Secrets
 from olbot.hedger import Hedger
-from olbot.ledger import Ledger
+from olbot.ledger import Ledger, pending_scope
 from olbot.lighter.ws import LighterPublicWS
 from olbot.market import BasisTracker, MarketBoard, basis_status
 from olbot.markets import fetch_ondo_perps, resolve
@@ -93,12 +93,12 @@ class Engine:
         self.ondo_rest = OndoRest(self.cfg.ondo.rest_url, s.ondo_api_key_id, s.ondo_api_secret, self.bucket)
         self.trader = LighterTrader(self.cfg.lighter.base_url, int(s.lighter_account_index),
                                     int(s.lighter_api_key_index), s.lighter_api_key_private_key)
-        pending_scope = f"{self.cfg.lighter.base_url.rstrip('/')}:account:{int(s.lighter_account_index)}"
+        scope = pending_scope(self.cfg.lighter.base_url, int(s.lighter_account_index))
         self.hedger = Hedger(
             self.trader, self.lighter_markets, self.cfg.hedging.max_slippage_bps, self.cfg.hedging.retries,
             record=self.ledger.record_hedge,
-            initial_pending=self.ledger.load_pending_hedges(pending_scope),
-            save_pending=lambda base, pending: self.ledger.save_pending_hedge(pending_scope, base, pending),
+            initial_pending=self.ledger.load_pending_hedges(scope),
+            save_pending=lambda base, pending: self.ledger.save_pending_hedge(scope, base, pending),
         )
         self.private_ws = OndoPrivateWS(
             self.cfg.ondo.ws_url, s.ondo_api_key_id, s.ondo_api_secret,
