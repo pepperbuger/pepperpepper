@@ -113,6 +113,6 @@ Ondo Perps는 아직 공개 베타라 거래소를 키우려고 매주 리워드
 
 ## 관련 문서
 
-- `docs/SPEC.md`: 기술 설계 전체
-- `CLAUDE.md`: Claude Code 작업 규칙
-- `README.md`: 시작 방법
+- [docs/SPEC.md](docs/SPEC.md): 기술 설계 전체
+- [CLAUDE.md](CLAUDE.md): Claude Code 작업 규칙
+- [README.md](README.md): 시작 방법
