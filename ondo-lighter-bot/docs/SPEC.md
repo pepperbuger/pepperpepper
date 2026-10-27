@@ -96,15 +96,18 @@ ondo-lighter-bot/
     markets.py            기초자산 -> Ondo 마켓 이름, Lighter market_id 연결 (완성)
     market.py             양쪽 최우선 호가, 괴리(bps), 괴리 중앙값 추적과 판정 (완성)
     watch.py              2단계: 시세 수신과 괴리 기록 실행기 (완성)
-    ondo/ws.py            공개 채널 topOfBooksPerps (완성). 로그인, 비공개 채널, 데드맨 스위치는 3단계
-    ondo/rest.py          3단계: HMAC 서명, 초당 1회 토큰 버킷, 주문/취소/잔고/포지션
-    lighter/ws.py         공개 채널 ticker/{market_id} (완성). 계정 이벤트는 5단계
-    lighter/client.py     5단계: SDK 래퍼, IOC 헷지 주문, 포지션, 논스 관리
-    quoter.py             4단계: 호가 가격과 수량 계산, 재호가 판단
-    hedger.py             5단계: 체결 이벤트 -> Lighter 헷지, 주기적 포지션 대사
-    risk.py               6단계: 킬 스위치 규칙, 노출 한도, 증거금 감시
-    ledger.py             SQLite 기록. 지금은 basis_samples, events 테이블만 (나머지는 각 단계에서 추가)
-    report.py             7단계: 주간 리포트
+    ondo/ws.py            공개 채널 topOfBooksPerps (완성)
+    ondo/private_ws.py    로그인, fillsPerps, positionsPerps, 데드맨 스위치 (완성)
+    ondo/rest.py          HMAC 서명, 토큰 버킷, 잔고/포지션/레버리지/전체 취소/일괄 주문 (완성)
+    ratelimit.py          Ondo REST 공용 토큰 버킷 (완성)
+    lighter/ws.py         공개 채널 ticker/{market_id} (완성)
+    lighter/client.py     SDK SignerClient 래퍼: IOC 시장가 헷지, 계정 포지션 조회 (완성)
+    quoter.py             호가 가격과 수량 계산, 재호가 판단 (완성)
+    hedger.py             포지션 차이 기준 헷지, 실패 시 슬리피지 넓혀 재시도 (완성)
+    risk.py               킬 스위치와 일시정지 판단 (완성)
+    engine.py             시작 절차, 호가/헷지/위험/기록 루프, 종료 절차 (완성)
+    ledger.py             SQLite: basis_samples, events, fills, hedges, quote_snapshots, equity, rewards (완성)
+    report.py             운영 리포트, 주간 리워드 수동 입력 (완성)
   tests/                  pytest
 ```
 
@@ -138,9 +141,9 @@ Lighter 시세는 호가창 전체(스냅샷+델타) 대신 최우선 호가만 
 
 1. `fillsPerps` 이벤트가 오면 해당 마켓의 차이 = Ondo 포지션 + Lighter 포지션을 계산한다.
 2. 차이가 Lighter 최소 주문보다 크면 Lighter에 IOC 주문을 보낸다. 최악 가격 = Lighter 중간가 +-`hedge_max_slippage_bps`(기본 15).
-3. 체결 확인은 WS 또는 tx 조회로 한다. 실패하면 최악 가격을 넓혀 최대 `hedge_retries`(기본 3)회 재시도한다. 그래도 실패하면 킬 스위치.
+3. 체결 확인은 주문 1.5초 뒤 Lighter 포지션을 다시 읽어 차이로 한다. 다시 읽기가 실패하면 체결 여부를 모르므로 재시도하지 않고 다음 대사에 맡긴다(중복 주문 방지). 실패하면 최악 가격을 넓혀 최대 `hedge_retries`(기본 3)회 재시도한다. 그래도 실패하면 킬 스위치.
 4. 최소 주문보다 작은 차이는 쌓아 두었다가 넘으면 헷지한다.
-5. 10초마다 대사: 양쪽 포지션을 WS 상태로 비교한다(Ondo REST는 요청 예산을 아끼기 위해 30초마다만 확인). 어긋나 있으면 2번과 같은 방식으로 맞춘다.
+5. 10초마다 대사: 양쪽 포지션을 REST로 읽어 비교한다(Ondo 요청 분당 6회). WS 포지션 채널은 청산된 포지션을 0으로 보낸다는 보장이 없어 쓰지 않는다. 체결 직후 5초 동안은 REST 스냅샷이 체결 전 값일 수 있어 그 마켓은 덮어쓰지 않는다. 어긋나 있으면 2번과 같은 방식으로 맞춘다.
 6. 헷지 비용 기록: Lighter 체결가와 Ondo 체결가의 차이(bps)를 매 건 남긴다. 이 숫자가 전략의 핵심 비용이다.
 
 재고 처리 모드(`inventory_mode`):
@@ -215,12 +218,17 @@ SQLite 테이블(`data/olbot.sqlite`):
 
 1. [완료] 골격과 설정: `pyproject.toml`, `config.py`, 로깅, `.env` 로딩. 완료 기준: `python -m olbot check-config` 통과. `--online`을 붙이면 설정한 마켓이 두 거래소에 실제로 있는지도 확인한다.
 2. [완료] 시세 수신(키 불필요): Ondo `topOfBooksPerps` + Lighter `ticker` 구독, 재연결, 공정가와 괴리 계산. 완료 기준: 1시간 끊김 없이 마켓 5개 괴리를 기록. 실행: `python -m olbot watch --markets LIT,NEAR,ENA,SOL,XRP --duration 3600`. 결과는 README의 "2단계 검증 결과"에 있다.
-3. Ondo 인증: HMAC REST 서명, WS 로그인, 잔고/포지션 조회, 데드맨 스위치. 완료 기준: 잔고 조회 성공(샌드박스 접근이 없으면 메인넷 키로 조회만), 단위 테스트로 서명 문자열 검증.
-4. dry_run 호가기: 호가 계산, 재호가 판단, 요청 예산 토큰 버킷. 완료 기준: 24시간 dry_run에서 분당 요청 50회를 넘지 않음.
-5. Lighter 헷지: SDK로 IOC 주문, 논스 관리, 체결 확인. 완료 기준: 테스트넷에서 주문, 체결 확인, 실패 재시도 테스트.
-6. 위험 관리: 킬 스위치 전 조건, 시작/종료 절차. 완료 기준: 각 조건을 모의로 발생시키는 테스트 통과, 실제로 프로세스를 강제 종료했을 때 30초 안에 Ondo 호가가 사라지는지 샌드박스에서 확인.
-7. 기록과 리포트. 완료 기준: 하루치 데이터로 리포트 출력.
-8. 소액 live. 메인넷 주문 전에는 반드시 사람에게 확인받는다.
+3~7단계는 "500달러로 바로 실운영해서 결과를 보자"는 결정에 따라 한 번에 만들었다(2026-10-27). 단위 테스트(52개)와 실시세 dry_run으로 검증했고, 실제 키로는 집에서 처음 돌린다. 구현하면서 단순화한 것:
+   - 재호가는 개별 주문 취소 대신 마켓 단위 전체 취소 + 일괄 생성(요청 2회)으로 한다. 주문 ID를 추적하지 않아도 되고 남는 주문이 생기지 않는다.
+   - 헷지 체결 확인은 Lighter 포지션을 다시 읽어 차이로 판단한다. 체결 이벤트를 놓치거나 중복으로 받아도 결과가 틀어지지 않는다.
+   - 손실 한도는 손익 계산 대신 두 거래소 자산 합계(Ondo marginBalance + Lighter total_asset_value)의 시작 대비 감소로 본다.
+   - 마켓별로 괴리 이탈 기준을 따로 줄 수 있다(markets[].basis_deviation_bps). LIT는 25.
+3. [코드 완료] Ondo 인증: HMAC REST 서명, WS 로그인, 잔고/포지션 조회, 데드맨 스위치. 완료 기준: 잔고 조회 성공(샌드박스 접근이 없으면 메인넷 키로 조회만), 단위 테스트로 서명 문자열 검증.
+4. [코드 완료, dry_run 확인: 분당 요청 약 25~30회] dry_run 호가기: 호가 계산, 재호가 판단, 요청 예산 토큰 버킷. 완료 기준: 24시간 dry_run에서 분당 요청 50회를 넘지 않음.
+5. [코드 완료] Lighter 헷지: SDK로 IOC 주문, 논스 관리, 체결 확인. 완료 기준: 테스트넷에서 주문, 체결 확인, 실패 재시도 테스트.
+6. [코드 완료] 위험 관리: 킬 스위치 전 조건, 시작/종료 절차. 완료 기준: 각 조건을 모의로 발생시키는 테스트 통과, 실제로 프로세스를 강제 종료했을 때 30초 안에 Ondo 호가가 사라지는지 샌드박스에서 확인.
+7. [코드 완료] 기록과 리포트. 완료 기준: 하루치 데이터로 리포트 출력.
+8. 소액 live (500달러, LIT와 ENA). 순서는 docs/HANDOFF.md.
 
 ## 9. 예상 손익 (가정, 1주차 측정으로 교체할 숫자)
 

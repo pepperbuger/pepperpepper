@@ -11,6 +11,7 @@ dependencies = [
     "websockets>=12",
     "pyyaml>=6",
     "python-dotenv>=1",
+    "lighter-sdk>=1.1.8",
 ]
 
 [project.optional-dependencies]

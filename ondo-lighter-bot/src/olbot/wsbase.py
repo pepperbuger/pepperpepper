@@ -39,6 +39,12 @@ class ReconnectingWS:
         self.connect_count = 0
         self.disconnect_count = 0
         self._stop = asyncio.Event()
+        self._ws = None
+
+    def send_nowait(self, payload: dict) -> None:
+        """on_message 안에서 응답을 보내야 할 때 쓴다 (예: 로그인 확인 후 구독)."""
+        if self._ws is not None:
+            asyncio.get_running_loop().create_task(self._ws.send(json.dumps(payload)))
 
     def subscriptions(self) -> list[dict]:
         raise NotImplementedError
@@ -67,6 +73,7 @@ class ReconnectingWS:
         while not self._stop.is_set():
             try:
                 async with websockets.connect(self.url, ping_interval=None, max_size=2**22, close_timeout=3) as ws:
+                    self._ws = ws
                     self.connected = True
                     self.connect_count += 1
                     await self._emit("connected", self.url)
@@ -86,6 +93,7 @@ class ReconnectingWS:
             except Exception as e:  # 네트워크 오류는 전부 재연결로 처리
                 self.log.warning("connection error: %r", e)
                 await self._emit("error", repr(e)[:300])
+            self._ws = None
             if self.connected:
                 self.connected = False
                 if self._stop.is_set():

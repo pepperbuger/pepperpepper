@@ -31,7 +31,6 @@ hedging:
   max_slippage_bps: 15
   retries: 3
   reconcile_interval_sec: 10
-  ondo_rest_reconcile_sec: 30
 
 risk:
   max_unhedged_usd: 300

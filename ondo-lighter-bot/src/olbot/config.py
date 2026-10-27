@@ -70,7 +70,6 @@ class HedgingCfg:
     max_slippage_bps: float = 15.0
     retries: int = 3
     reconcile_interval_sec: float = 10.0
-    ondo_rest_reconcile_sec: float = 30.0
 
 
 @dataclass
@@ -88,6 +87,7 @@ class MarketCfg:
     base: str
     size_usd_per_side: Decimal
     max_inventory_usd: Decimal
+    basis_deviation_bps: float | None = None  # 이 마켓만 다른 괴리 이탈 기준을 쓸 때
 
 
 @dataclass
@@ -247,6 +247,12 @@ def validate(cfg: Config) -> list[str]:
             errs.append(f"markets.{m.base}.size_usd_per_side는 0보다 커야 함")
         if m.max_inventory_usd < m.size_usd_per_side:
             errs.append(f"markets.{m.base}.max_inventory_usd가 size_usd_per_side보다 작음")
+        if m.basis_deviation_bps is not None and (
+            isinstance(m.basis_deviation_bps, bool)
+            or not isinstance(m.basis_deviation_bps, (int, float))
+            or not 0 < m.basis_deviation_bps < q.basis_sanity_bps
+        ):
+            errs.append(f"markets.{m.base}.basis_deviation_bps는 0보다 크고 basis_sanity_bps보다 작은 숫자")
     if cfg.risk.max_total_inventory_usd <= 0:
         errs.append("risk.max_total_inventory_usd는 0보다 커야 함")
     for name, url in (
@@ -265,6 +271,29 @@ def validate(cfg: Config) -> list[str]:
     ):
         if not url.startswith("wss://"):
             errs.append(f"{name}는 wss:// 로 시작해야 함")
+    return errs
+
+
+def validate_live(cfg: Config, secrets: "Secrets") -> list[str]:
+    """실운영 전에만 보는 추가 조건."""
+    errs = []
+    if cfg.mode != "live":
+        errs.append("config의 mode가 live가 아니다")
+    missing = [k for k, v in secrets.present().items() if not v]
+    if missing:
+        errs.append(f".env에 비어 있는 값: {missing}")
+    md = cfg.market_data
+    if cfg.ondo.rest_url.rstrip("/") != md.ondo_rest_url.rstrip("/"):
+        errs.append("ondo.rest_url과 market_data.ondo_rest_url이 다르다 (주문 환경과 시세 환경이 같아야 한다)")
+    if cfg.lighter.base_url.rstrip("/") != md.lighter_rest_url.rstrip("/"):
+        errs.append("lighter.base_url과 market_data.lighter_rest_url이 다르다 (마켓 ID가 달라진다)")
+    if cfg.ondo.ws_url.split("?")[0] != md.ondo_ws_url.split("?")[0]:
+        errs.append("ondo.ws_url과 market_data.ondo_ws_url이 다르다")
+    for m in cfg.markets:
+        if m.size_usd_per_side < 15:
+            errs.append(f"markets.{m.base}.size_usd_per_side는 15 이상 (Lighter 최소 주문 10 USD를 한 번에 헷지하려면)")
+    if cfg.risk.max_unhedged_usd < 15:
+        errs.append("risk.max_unhedged_usd는 15 이상 (Lighter 최소 주문보다 작은 차이는 헷지되지 않고 남는다)")
     return errs
 
 

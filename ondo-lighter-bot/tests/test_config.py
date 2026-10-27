@@ -64,6 +64,7 @@ def test_missing_file_explains_how_to_create(tmp_path):
         (lambda r: r["ondo"].update(leverage=20), "ondo.leverage"),
         (lambda r: r["lighter"].update(ws_url="ws://insecure"), "wss://"),
         (lambda r: r["quoting"].update(basis_deviation_bps=200), "basis_deviation_bps"),
+        (lambda r: r["markets"][0].update(basis_deviation_bps="wide"), "markets.LIT.basis_deviation_bps"),
     ],
 )
 def test_validation_catches_inconsistent_values(tmp_path, mutate, needle):

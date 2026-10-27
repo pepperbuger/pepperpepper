@@ -42,7 +42,8 @@
 - 테스트: `.venv/bin/python -m pytest`
 - 설정 검증: `.venv/bin/python -m olbot check-config --online`
 - 시세 확인(주문 없음): `.venv/bin/python -m olbot watch --duration 600`
-- 1~2단계는 완료됐다. 새 WS 클라이언트는 `wsbase.ReconnectingWS`를 상속하고, 메시지 파싱은 `market.py`처럼 순수 함수로 분리해서 실제로 받은 메시지로 테스트한다.
+- 실행: `.venv/bin/python -m olbot run` (dry_run), `run --live` (실운영), `report --hours 24`
+- 1~7단계 코드는 완료됐다. 실제 키로 처음 돌릴 때 생기는 문제를 고치는 게 다음 일이다. 새 WS 클라이언트는 `wsbase.ReconnectingWS`를 상속하고, 메시지 파싱은 `market.py`처럼 순수 함수로 분리해서 실제로 받은 메시지로 테스트한다.
 
 ## 코드 규칙
 

@@ -2,6 +2,8 @@
 
   python -m olbot check-config [--online]
   python -m olbot watch [--duration 3600] [--markets LIT,NEAR]
+  python -m olbot run [--live] [--duration 3600]
+  python -m olbot report [--hours 24] [--add-reward 시작일 종료일 USDC 포인트]
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import logging
 import logging.handlers
 from pathlib import Path
 
-from olbot.config import ConfigError, load_config, load_secrets, uses_mainnet_trading, validate
+from olbot.config import ConfigError, load_config, load_secrets, uses_mainnet_trading, validate, validate_live
 
 
 def setup_logging(log_path: str | None, verbose: bool) -> None:
@@ -96,6 +98,58 @@ def cmd_watch(args) -> int:
     return asyncio.run(run_watch(cfg, bases, args.duration, args.report_every))
 
 
+def cmd_run(args) -> int:
+    from olbot.engine import Engine
+    from olbot.ledger import Ledger
+
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as e:
+        print(f"설정 오류: {e}")
+        return 2
+    errs = validate(cfg)
+    secrets = load_secrets(args.env)
+    if args.live:
+        errs += validate_live(cfg, secrets)
+    if errs:
+        for e in errs:
+            print(f"실행 불가: {e}")
+        return 1
+    if cfg.mode == "live" and not args.live:
+        print("config는 live지만 --live 플래그가 없어 dry_run으로 실행한다 (주문 없음)")
+    setup_logging(cfg.storage.log_path, args.verbose)
+    ledger = Ledger(cfg.storage.sqlite_path)
+    try:
+        return asyncio.run(Engine(cfg, secrets, args.live, ledger).run(args.duration))
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        ledger.close()
+
+
+def cmd_report(args) -> int:
+    import time as _time
+
+    from olbot.ledger import Ledger
+    from olbot.report import build_report
+
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as e:
+        print(f"설정 오류: {e}")
+        return 2
+    ledger = Ledger(cfg.storage.sqlite_path)
+    try:
+        if args.add_reward:
+            week_start, week_end, usdc, points = args.add_reward
+            ledger.add_reward(week_start, week_end, usdc, points, args.note or "")
+            print("리워드 기록 완료")
+        print(build_report(ledger, _time.time() - args.hours * 3600))
+    finally:
+        ledger.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="olbot", description="Ondo + Lighter 유동성 리워드 봇")
     p.add_argument("--config", default="config.yaml", help="설정 파일 (기본 config.yaml)")
@@ -112,6 +166,18 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--markets", help="설정 대신 쓸 기초자산 목록 (예: LIT,NEAR,ENA,SOL,XRP)")
     w.add_argument("--report-every", type=float, default=60.0, help="현황 출력 간격(초)")
     w.set_defaults(func=cmd_watch)
+
+    r = sub.add_parser("run", help="봇 실행. --live가 없으면 dry_run (주문 없음, 키 불필요)")
+    r.add_argument("--live", action="store_true", help="실제 주문. config의 mode: live와 .env 키가 모두 필요")
+    r.add_argument("--duration", type=float, default=None, help="실행 시간(초). 없으면 Ctrl+C까지")
+    r.set_defaults(func=cmd_run)
+
+    rp = sub.add_parser("report", help="운영 결과 리포트")
+    rp.add_argument("--hours", type=float, default=24 * 7, help="최근 몇 시간 (기본 168 = 1주)")
+    rp.add_argument("--add-reward", nargs=4, metavar=("WEEK_START", "WEEK_END", "USDC", "POINTS"),
+                    help="Ondo 앱에서 확인한 주간 리워드 기록. 예: 2026-10-27 2026-11-02 3.21 1500")
+    rp.add_argument("--note", help="리워드 메모")
+    rp.set_defaults(func=cmd_report)
     return p
 
 

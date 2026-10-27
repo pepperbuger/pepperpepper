@@ -28,6 +28,26 @@ CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL,
     detail TEXT
 );
+CREATE TABLE IF NOT EXISTS fills (
+    ts REAL NOT NULL, base TEXT NOT NULL, fill_id TEXT, side TEXT,
+    price TEXT, size TEXT, fee TEXT, is_maker INTEGER,
+    ondo_mid TEXT, lighter_mid TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS fills_id ON fills(fill_id);
+CREATE TABLE IF NOT EXISTS hedges (
+    ts REAL NOT NULL, base TEXT NOT NULL, size TEXT, side TEXT,
+    worst_price TEXT, lighter_mid TEXT, filled TEXT, error TEXT
+);
+CREATE TABLE IF NOT EXISTS quote_snapshots (
+    ts REAL NOT NULL, base TEXT NOT NULL, side TEXT,
+    price TEXT, size TEXT, notional_usd REAL, dist_bps REAL, in_band INTEGER, interval_s REAL
+);
+CREATE TABLE IF NOT EXISTS equity (
+    ts REAL NOT NULL, ondo_usd TEXT, lighter_usd TEXT, total_usd TEXT
+);
+CREATE TABLE IF NOT EXISTS rewards (
+    ts REAL NOT NULL, week_start TEXT, week_end TEXT, usdc TEXT, points TEXT, note TEXT
+);
 """
 
 
@@ -64,6 +84,43 @@ class Ledger:
         )
 
     def commit(self) -> None:
+        self.db.commit()
+
+    def record_fill(self, base: str, fill: dict, ondo_mid, lighter_mid) -> bool:
+        """Ondo 체결 한 건. 같은 fill id가 다시 오면 무시하고 False."""
+        cur = self.db.execute(
+            "INSERT OR IGNORE INTO fills VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (time.time(), base, fill.get("id"), fill.get("side"), fill.get("price"), fill.get("size"),
+             fill.get("fee"), 1 if fill.get("isMaker") else 0,
+             str(ondo_mid) if ondo_mid is not None else None, str(lighter_mid) if lighter_mid is not None else None),
+        )
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def record_hedge(self, base, size, is_sell, worst, lighter_mid, filled, error) -> None:
+        self.db.execute(
+            "INSERT INTO hedges VALUES (?,?,?,?,?,?,?,?)",
+            (time.time(), base, str(size), "sell" if is_sell else "buy", str(worst), str(lighter_mid), str(filled), error),
+        )
+        self.db.commit()
+
+    def record_quote(self, ts, base, side, price, size, mid, band_bps, interval_s) -> None:
+        dist = float(abs(price - mid) / mid * 10_000)
+        self.db.execute(
+            "INSERT INTO quote_snapshots VALUES (?,?,?,?,?,?,?,?,?)",
+            (ts, base, side, str(price), str(size), float(price * size), dist, 1 if dist <= band_bps else 0, interval_s),
+        )
+
+    def record_equity(self, ondo_usd, lighter_usd) -> None:
+        total = None if ondo_usd is None or lighter_usd is None else ondo_usd + lighter_usd
+        self.db.execute(
+            "INSERT INTO equity VALUES (?,?,?,?)",
+            (time.time(), str(ondo_usd), str(lighter_usd), str(total) if total is not None else None),
+        )
+        self.db.commit()
+
+    def add_reward(self, week_start: str, week_end: str, usdc: str, points: str, note: str = "") -> None:
+        self.db.execute("INSERT INTO rewards VALUES (?,?,?,?,?,?)", (time.time(), week_start, week_end, usdc, points, note))
         self.db.commit()
 
     def basis_summary(self, since: float) -> list[tuple]:
