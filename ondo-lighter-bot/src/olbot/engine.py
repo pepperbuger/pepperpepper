@@ -69,6 +69,10 @@ class Engine:
     # ---------- 준비 ----------
 
     async def setup(self) -> None:
+        if self.live:
+            from olbot.trial import require_resolved_trial
+
+            require_resolved_trial(self.cfg)
         md = self.cfg.market_data
         resolved = await resolve(self.bases, md.ondo_rest_url, md.lighter_rest_url)
         if resolved.problems:
