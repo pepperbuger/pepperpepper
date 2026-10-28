@@ -173,7 +173,14 @@ def test_parse_order_status_and_terminal_states():
     assert parse_order_status({"client_order_index": 9, "status": "filled",
                                "filled_base_amount": "20", "initial_base_amount": "20"}).terminal
     for s in ("open", "pending", "in-progress"):
-        assert not parse_order_status({"client_order_index": 9, "status": s}).terminal
+        assert not parse_order_status({"client_order_index": 9, "status": s, "filled_base_amount": "0",
+                                       "initial_base_amount": "20"}).terminal
+    from olbot.lighter.client import OrderStatusError
+    for bad in ({"client_order_index": 9, "status": "filled", "initial_base_amount": "20"},
+                {"client_order_index": 9, "status": "open"},
+                {"status": "filled", "filled_base_amount": "20", "initial_base_amount": "20"}):
+        with pytest.raises(OrderStatusError):  # 누락을 0으로 채우지 않는다
+            parse_order_status(bad)
 
 
 async def test_trader_order_status_queries_by_client_index_with_auth(monkeypatch):
@@ -289,3 +296,92 @@ async def test_verify_keys_reports_each_check(monkeypatch):
     by = {n: ok for n, ok, _ in results}
     assert by["Ondo REST 잔고"] and not by["Ondo REST 포지션"] and by["Ondo WS 로그인"]
     assert by["Lighter API 키 등록"] and by["Lighter 주문 조회 인증"]
+
+
+# ---------- 87fa32b 검토: 필드 누락, 1단위 오차 허용, 나중에 확인된 취소의 실패 누락 ----------
+
+class RawStatusTrader(StatusTrader):
+    """order_status가 거래소 원본 응답(dict)을 파서로 넘기는 경로를 그대로 탄다."""
+
+    def __init__(self, raw_for_coi):
+        super().__init__([])
+        self.raw_for_coi = raw_for_coi
+
+    async def market_order(self, m, size, is_sell, worst, client_order_index=None):
+        self.sends.append((size, is_sell, worst, client_order_index))
+        # 실제로는 전량 체결됐지만 포지션 조회에는 아직 반영되지 않은 상황 (가장 위험한 경우)
+        return None
+
+    async def order_status(self, coi):
+        return parse_order_status(self.raw_for_coi(coi))
+
+
+@pytest.mark.parametrize("raw", [
+    {"status": "filled", "initial_base_amount": "20.00"},                       # filled 수량 누락
+    {"status": "filled", "filled_base_amount": "20.00"},                        # 주문 수량 누락
+    {"filled_base_amount": "20.00", "initial_base_amount": "20.00"},            # 상태 누락
+    {"status": "filled", "filled_base_amount": "abc", "initial_base_amount": "20.00"},
+    {"status": "filled", "filled_base_amount": "12.00", "initial_base_amount": "20.00"},  # filled인데 일부만
+    {"status": "canceled", "filled_base_amount": "25.00", "initial_base_amount": "20.00"},  # 체결 > 주문
+    {"status": "filled", "filled_base_amount": "30.00", "initial_base_amount": "30.00"},  # 보낸 수량과 다름
+    {"status": "mystery", "filled_base_amount": "0", "initial_base_amount": "20.00"},     # 모르는 상태
+])
+async def test_malformed_or_inconsistent_status_keeps_pending(monkeypatch, raw):
+    """보낸 수량은 20. 응답이 이상하면 포지션 반영 전이어도 미체결로 확정하지 않는다."""
+    t = RawStatusTrader(lambda coi: {"client_order_index": coi, **raw})
+    h = hedger(t, monkeypatch)
+    for _ in range(3):
+        await h.hedge("LIT", D("3"))
+    assert len(t.sends) == 1  # 잘못된 응답을 미체결로 확정해 다시 보내면 안 된다
+    assert h.states["LIT"].pending is not None
+
+
+async def test_one_unit_unreflected_fill_is_not_accepted(monkeypatch):
+    # 0.01개 체결 후 취소됐는데 포지션 조회에는 아직 0으로 보임 -> 통과시키면 20개를 다시 보낸다
+    t = StatusTrader([("canceled-too-much-slippage", 0, False, 0), ("filled", 1, False, 0)])
+    real_order = t.market_order
+
+    async def tiny_fill_hidden(m, size, is_sell, worst, client_order_index=None):
+        await real_order(m, size, is_sell, worst, client_order_index)
+        if len(t.sends) == 1:
+            t.orders[client_order_index][1] = D("0.01")  # 거래소 기록: 0.01 체결
+        return None
+
+    t.market_order = tiny_fill_hidden
+    h = hedger(t, monkeypatch)
+    await h.hedge("LIT", D("3"))
+    assert len(t.sends) == 1 and h.states["LIT"].pending is not None  # 반영 전에는 대기
+    t.pos = D("-0.01")  # 포지션 반영됨
+    await h.hedge("LIT", D("3"))
+    assert [s[0] for s in t.sends] == [D("20"), D("19.99")]  # 잔량만
+
+
+async def test_cancel_confirmed_on_later_reconcile_counts_failure_and_widens(monkeypatch):
+    # 취소 결과가 첫 확인에는 안 보이고 다음 대사에서 확인되는 경우가 반복된다
+    t = StatusTrader([("canceled-too-much-slippage", 0, False, 1)] * 4)
+    h = hedger(t, monkeypatch)
+    for _ in range(8):
+        await h.hedge("LIT", D("3"))
+        if len(t.sends) == 4:
+            break
+    worsts = [s[2] for s in t.sends]
+    assert worsts[1] < worsts[0] and worsts[2] < worsts[1]  # 매도 최악 가격이 점점 넓어진다
+    assert h.states["LIT"].consecutive_failures >= 3  # 위험 판단이 kill할 수 있다
+
+
+async def test_exchange_size_matches_rounded_down_sent_size(monkeypatch):
+    # Ondo 차이가 19.996개면 Lighter에는 19.99개로 내림해서 보낸다. 그 주문은 정상 확정돼야 한다
+    t = StatusTrader([("filled", 1, False, 0)])
+
+    async def mo(m, size, is_sell, worst, client_order_index=None):
+        sent = D(m.to_int_size(size)).scaleb(-m.size_decimals)
+        t.sends.append((size, is_sell, worst, client_order_index))
+        t.pos += -sent if is_sell else sent
+        t.orders[client_order_index] = ["filled", sent, sent, 0]
+        return None
+
+    t.market_order = mo
+    h = hedger(t, monkeypatch)
+    h.set_ondo_positions({"LIT": D("19.996")})
+    await h.hedge("LIT", D("3"))
+    assert h.states["LIT"].pending is None and len(t.sends) == 1

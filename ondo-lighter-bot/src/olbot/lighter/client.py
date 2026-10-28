@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
 from olbot.markets import get_json
 
@@ -77,13 +77,45 @@ class OrderStatus:
         return self.status == TERMINAL_FILLED or self.status.startswith("canceled")
 
 
+class OrderStatusError(ValueError):
+    """주문 상태 응답이 비었거나 앞뒤가 안 맞는다. 미체결로 보지 말고 미확정을 유지해야 한다."""
+
+
+def _required_decimal(order: dict, key: str) -> Decimal:
+    raw = order.get(key)
+    if raw is None or str(raw).strip() == "":
+        raise OrderStatusError(f"{key} 누락")
+    try:
+        value = Decimal(str(raw))
+    except InvalidOperation:
+        raise OrderStatusError(f"{key} 숫자 아님: {raw!r}")
+    if not value.is_finite() or value < 0:
+        raise OrderStatusError(f"{key} 비정상: {raw!r}")
+    return value
+
+
 def parse_order_status(order: dict) -> OrderStatus:
-    return OrderStatus(
-        client_order_index=int(order["client_order_index"]),
-        status=str(order.get("status") or ""),
-        filled=Decimal(str(order.get("filled_base_amount") or "0")),
-        initial=Decimal(str(order.get("initial_base_amount") or "0")),
-    )
+    """accountOrders 주문 한 건을 엄격하게 읽는다.
+
+    필드가 빠졌거나(0으로 채우지 않는다), 모르는 상태이거나, 수량이 앞뒤가 안 맞으면 OrderStatusError.
+    호출 쪽은 이를 조회 실패로 다뤄 미확정을 유지한다.
+    """
+    if "client_order_index" not in order:
+        raise OrderStatusError("client_order_index 누락")
+    status = str(order.get("status") or "").strip()
+    if not status:
+        raise OrderStatusError("status 누락")
+    if status not in OPEN_STATUSES and status != TERMINAL_FILLED and not status.startswith("canceled"):
+        raise OrderStatusError(f"모르는 status: {status!r}")
+    filled = _required_decimal(order, "filled_base_amount")
+    initial = _required_decimal(order, "initial_base_amount")
+    if initial <= 0:
+        raise OrderStatusError(f"initial_base_amount가 0 이하: {initial}")
+    if filled > initial:
+        raise OrderStatusError(f"체결 {filled} > 주문 {initial}")
+    if status == TERMINAL_FILLED and filled != initial:
+        raise OrderStatusError(f"status filled인데 체결 {filled} != 주문 {initial}")
+    return OrderStatus(int(order["client_order_index"]), status, filled, initial)
 
 
 AUTH_TOKEN_TTL_SEC = 8 * 60  # SDK 기본 토큰은 10분짜리. 여유를 두고 8분마다 새로 만든다

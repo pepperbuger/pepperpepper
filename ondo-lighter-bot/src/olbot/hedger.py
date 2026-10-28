@@ -53,6 +53,8 @@ class HedgeState:
     consecutive_failures: int = 0
     last_attempt_ts: float = 0.0
     pending: PendingHedge | None = None
+    # 직전 대사에서 확정된 주문의 최종 상태. 체결 없이/일부만 끝났으면 다음 회차를 실패로 세고 가격을 넓힌다.
+    last_final_status: str | None = None
 
     @property
     def delta(self) -> Decimal:
@@ -183,6 +185,12 @@ class Hedger:
             return WAITING
         if not os.terminal:
             return WAITING
+        sent_size = Decimal(m.to_int_size(p.size)).scaleb(-m.size_decimals)  # 거래소에 실제로 보낸 수량(내림)
+        if os.initial != sent_size:
+            # 같은 주문 번호인데 수량이 다르면 다른 주문이거나 응답이 잘못됐다. 확정하지 않는다.
+            log.error("hedge %s order %s size mismatch: exchange %s vs sent %s; keeping unconfirmed",
+                      base, p.client_order_index, os.initial, sent_size)
+            return WAITING
         # 최종 체결 수량이 확정됐다. 포지션이 그만큼 반영된 것을 확인한 뒤에만 해제한다.
         # 그 전에 해제하면 오래된 포지션으로 차이를 계산해 중복 헷지할 수 있다.
         try:
@@ -191,8 +199,8 @@ class Hedger:
             log.warning("hedge %s final status %s known but position refresh failed: %r", base, os.status, e)
             return WAITING
         expected = p.lighter_pos_before + p.signed(os.filled)
-        tolerance = Decimal(1).scaleb(-m.size_decimals)
-        if abs(st.lighter_pos - expected) > tolerance:
+        # 오차를 허용하지 않는다. 최소 단위 하나(예: 0.01개)라도 반영 전이면 기다린다.
+        if st.lighter_pos != expected:
             log.warning("hedge %s order %s is %s (filled %s) but position %s != expected %s; waiting",
                         base, p.client_order_index, os.status, os.filled, st.lighter_pos, expected)
             return WAITING
@@ -200,6 +208,7 @@ class Hedger:
         if self.record:
             self.record(base, p.size, p.is_sell, None, None, os.filled, f"final:{os.status}")
         self._set_pending(base, None)
+        st.last_final_status = os.status
         return None
 
     async def _hedge_attempts(self, base: str, lighter_mid: Decimal) -> str:
@@ -208,6 +217,12 @@ class Hedger:
         waiting = await self._resolve_pending(base)
         if waiting:
             return waiting
+        if st.last_final_status not in (None, "filled"):
+            # 앞선 대사에서 넘어온 주문이 체결 없이/일부만 끝났다: 그 회차를 실패로 센다
+            st.consecutive_failures += 1
+            log.warning("hedge %s previous order ended %s (counted as failure %d)",
+                        base, st.last_final_status, st.consecutive_failures)
+        st.last_final_status = None
         # 확실히 거절됐거나 미체결로 확정된 직전 회차가 있으면 더 넓은 가격부터 시작한다.
         widen = min(st.consecutive_failures, self.retries - 1)
         for attempt in range(self.retries):
@@ -243,6 +258,7 @@ class Hedger:
             await asyncio.sleep(1.5)  # 첫 조회 전 대기. 최종 체결/미체결 보장 시간은 아니다.
             if await self._resolve_pending(base) == WAITING:
                 return WAITING  # 결과를 모르면 다시 보내지 않는다
+            st.last_final_status = None  # 이번 호출 안에서 확정된 결과는 아래 회차 번호로 가격을 넓힌다
             # 최종 결과 확인 완료 (전량, 일부, 또는 미체결). 남은 차이가 있으면 다음 회차에서 넓은 가격으로 보낸다.
             if hedge_order(st.delta, m, lighter_mid, self.slippage_bps) is None:
                 return DONE
