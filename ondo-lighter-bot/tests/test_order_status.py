@@ -175,8 +175,15 @@ def test_parse_order_status_and_terminal_states():
     for s in ("open", "pending", "in-progress"):
         assert not parse_order_status({"client_order_index": 9, "status": s, "filled_base_amount": "0",
                                        "initial_base_amount": "20"}).terminal
-    from olbot.lighter.client import OrderStatusError
+    from olbot.lighter.client import CANCELED_STATUSES, OrderStatusError
+    for s in CANCELED_STATUSES:  # SDK enum의 취소 상태는 전부 최종
+        assert parse_order_status({"client_order_index": 9, "status": s, "filled_base_amount": "0",
+                                   "initial_base_amount": "20"}).terminal
     for bad in ({"client_order_index": 9, "status": "filled", "initial_base_amount": "20"},
+                {"client_order_index": 9, "status": "canceled-unrecognized-state", "filled_base_amount": "0",
+                 "initial_base_amount": "20"},  # 접두어만 맞는 상태는 거부
+                {"client_order_index": 9, "status": "canceledx", "filled_base_amount": "0",
+                 "initial_base_amount": "20"},
                 {"client_order_index": 9, "status": "open"},
                 {"status": "filled", "filled_base_amount": "20", "initial_base_amount": "20"}):
         with pytest.raises(OrderStatusError):  # 누락을 0으로 채우지 않는다
@@ -272,6 +279,24 @@ async def test_verify_keys_reports_each_check(monkeypatch):
     async def login(url, key_id, secret, timeout=10.0):
         return "ok"
 
+    monkeypatch.setattr(verify.OndoRest, "balance", balance)
+    monkeypatch.setattr(verify.OndoRest, "positions", positions)
+    monkeypatch.setattr(verify, "_ondo_ws_login", login)
+    monkeypatch.setattr("olbot.lighter.client.LighterTrader", _verify_trader([_REAL_LIKE]))
+    results = await verify.verify_keys(cfg, secrets)
+    by = {n: ok for n, ok, _ in results}
+    assert by["Ondo REST 잔고"] and not by["Ondo REST 포지션"] and by["Ondo WS 로그인"]
+    assert by["Lighter API 키 등록"] and by["Lighter 주문 조회 인증"]
+    assert by["Lighter 주문 응답 형식"] and by["Lighter 주문 번호 조회"]
+
+
+_REAL_LIKE = {"client_order_index": 42, "status": "canceled-too-much-slippage",
+              "filled_base_amount": "12.00", "initial_base_amount": "20.00", "market_index": 120}
+
+
+def _verify_trader(recent, by_coi=None):
+    """verify-keys용 가짜 Lighter. recent: 과거 주문 원본, by_coi: 주문 번호 조회가 돌려줄 원본(기본은 recent에서 찾음)."""
+
     class T:
         def __init__(self, *a):
             pass
@@ -282,20 +307,97 @@ async def test_verify_keys_reports_each_check(monkeypatch):
         async def account(self):
             return {"total_asset_value": "250", "available_balance": "250"}
 
+        async def recent_orders(self, limit=5):
+            return list(recent)
+
         async def order_status(self, coi):
-            return None
+            src = by_coi if by_coi is not None else {o.get("client_order_index"): o for o in recent}
+            raw = src.get(coi)
+            return None if raw is None else parse_order_status(raw)
 
         async def close(self):
             pass
 
-    monkeypatch.setattr(verify.OndoRest, "balance", balance)
-    monkeypatch.setattr(verify.OndoRest, "positions", positions)
-    monkeypatch.setattr(verify, "_ondo_ws_login", login)
-    monkeypatch.setattr("olbot.lighter.client.LighterTrader", T)
-    results = await verify.verify_keys(cfg, secrets)
-    by = {n: ok for n, ok, _ in results}
-    assert by["Ondo REST 잔고"] and not by["Ondo REST 포지션"] and by["Ondo WS 로그인"]
-    assert by["Lighter API 키 등록"] and by["Lighter 주문 조회 인증"]
+    return T
+
+
+async def _lighter_checks(monkeypatch, trader_cls):
+    from olbot import verify
+    from olbot.config import Secrets
+    from olbot.lighter.client import LighterTrader  # noqa: F401  (monkeypatch 대상 모듈 로드)
+
+    class Cfg:
+        class ondo:
+            rest_url = "https://x"
+            ws_url = "wss://x"
+
+        class lighter:
+            base_url = "https://mainnet.zklighter.elliot.ai"
+
+    async def ok(*a, **k):
+        return {}
+
+    monkeypatch.setattr(verify.OndoRest, "balance", ok)
+    monkeypatch.setattr(verify.OndoRest, "positions", lambda self: ok())
+    monkeypatch.setattr(verify, "_ondo_ws_login", lambda *a, **k: ok())
+    monkeypatch.setattr("olbot.lighter.client.LighterTrader", trader_cls)
+    results = await verify.verify_keys(Cfg, Secrets("ondoKeyId_a", "ondoApiSecret_b", "0xk", "7", "4"))
+    return {n: (ok_, d) for n, ok_, d in results}
+
+
+async def test_verify_keys_without_order_history_does_not_pass(monkeypatch):
+    # 빈 목록 조회는 파서를 타지 않는다. 과거 주문이 없으면 형식 확인을 통과로 치지 않는다
+    by = await _lighter_checks(monkeypatch, _verify_trader([]))
+    assert by["Lighter 주문 조회 인증"][0]
+    ok, detail = by["Lighter 주문 응답 형식"]
+    assert not ok and "기록이 없어" in detail
+
+
+async def test_verify_keys_reports_real_record_the_parser_rejects(monkeypatch):
+    raw = dict(_REAL_LIKE)
+    del raw["filled_base_amount"]
+    raw["filledBaseAmount"] = "12.00"  # 실제 필드 이름이 다르면 여기서 드러나야 한다
+    by = await _lighter_checks(monkeypatch, _verify_trader([raw]))
+    ok, detail = by["Lighter 주문 응답 형식"]
+    assert not ok and "filled_base_amount 누락" in detail and "filledBaseAmount" in detail
+    assert "Lighter 주문 번호 조회" not in by
+
+
+async def test_verify_keys_unknown_cancel_status_is_reported(monkeypatch):
+    raw = dict(_REAL_LIKE, status="canceled-unrecognized-state")
+    by = await _lighter_checks(monkeypatch, _verify_trader([raw]))
+    assert not by["Lighter 주문 응답 형식"][0]
+
+
+async def test_verify_keys_lookup_by_client_index_must_match_history(monkeypatch):
+    other = dict(_REAL_LIKE, filled_base_amount="0.00")
+    by = await _lighter_checks(monkeypatch, _verify_trader([_REAL_LIKE], by_coi={42: other}))
+    assert by["Lighter 주문 응답 형식"][0]
+    assert not by["Lighter 주문 번호 조회"][0]
+    by = await _lighter_checks(monkeypatch, _verify_trader([_REAL_LIKE], by_coi={}))
+    assert not by["Lighter 주문 번호 조회"][0]  # 기록엔 있는데 번호 조회로 못 찾음
+
+
+async def test_verify_keys_order_without_client_index_is_not_a_pass(monkeypatch):
+    raw = dict(_REAL_LIKE, client_order_index=0)
+    by = await _lighter_checks(monkeypatch, _verify_trader([raw]))
+    assert by["Lighter 주문 응답 형식"][0]
+    assert not by["Lighter 주문 번호 조회"][0]
+
+
+async def test_trader_recent_orders_uses_inactive_orders_with_auth(monkeypatch):
+    seen = {}
+
+    async def fake_get_json(url, timeout=20.0, headers=None):
+        seen["url"], seen["headers"] = url, headers
+        return {"code": 200, "orders": [_REAL_LIKE]}
+
+    monkeypatch.setattr("olbot.lighter.client.get_json", fake_get_json)
+    t = LighterTrader("https://mainnet.zklighter.elliot.ai", 7, 4, "k")
+    t._auth = lambda: "tok"
+    assert await t.recent_orders(3) == [_REAL_LIKE]
+    assert seen["url"].endswith("/api/v1/accountInactiveOrders?account_index=7&limit=3")
+    assert seen["headers"] == {"authorization": "tok"}
 
 
 # ---------- 87fa32b 검토: 필드 누락, 1단위 오차 허용, 나중에 확인된 취소의 실패 누락 ----------
@@ -325,6 +427,8 @@ class RawStatusTrader(StatusTrader):
     {"status": "canceled", "filled_base_amount": "25.00", "initial_base_amount": "20.00"},  # 체결 > 주문
     {"status": "filled", "filled_base_amount": "30.00", "initial_base_amount": "30.00"},  # 보낸 수량과 다름
     {"status": "mystery", "filled_base_amount": "0", "initial_base_amount": "20.00"},     # 모르는 상태
+    {"status": "canceled-unrecognized-state", "filled_base_amount": "0",                 # 목록에 없는 취소
+     "initial_base_amount": "20.00"},
 ])
 async def test_malformed_or_inconsistent_status_keeps_pending(monkeypatch, raw):
     """보낸 수량은 20. 응답이 이상하면 포지션 반영 전이어도 미체결로 확정하지 않는다."""

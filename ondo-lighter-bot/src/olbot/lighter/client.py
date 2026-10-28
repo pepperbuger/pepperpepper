@@ -60,7 +60,16 @@ def parse_account_positions(account: dict) -> dict[int, Decimal]:
 
 
 TERMINAL_FILLED = "filled"
-OPEN_STATUSES = {"in-progress", "pending", "open"}
+OPEN_STATUSES = frozenset({"in-progress", "pending", "open"})
+# lighter-sdk Order.status enum (lighter/models/order.py) 그대로. 접두어로 판정하지 않는다:
+# 목록에 없는 "canceled-..."는 모르는 상태로 보고 거부한다.
+CANCELED_STATUSES = frozenset({
+    "canceled", "canceled-post-only", "canceled-reduce-only", "canceled-position-not-allowed",
+    "canceled-margin-not-allowed", "canceled-too-much-slippage", "canceled-not-enough-liquidity",
+    "canceled-self-trade", "canceled-expired", "canceled-oco", "canceled-child", "canceled-liquidation",
+    "canceled-invalid-balance",
+})
+KNOWN_STATUSES = OPEN_STATUSES | CANCELED_STATUSES | {TERMINAL_FILLED}
 
 
 @dataclass(frozen=True)
@@ -73,8 +82,8 @@ class OrderStatus:
 
     @property
     def terminal(self) -> bool:
-        # filled 또는 canceled-* (canceled-too-much-slippage, canceled-not-enough-liquidity 등)
-        return self.status == TERMINAL_FILLED or self.status.startswith("canceled")
+        # filled 또는 공식 목록의 canceled-* (canceled-too-much-slippage 등)
+        return self.status == TERMINAL_FILLED or self.status in CANCELED_STATUSES
 
 
 class OrderStatusError(ValueError):
@@ -105,7 +114,7 @@ def parse_order_status(order: dict) -> OrderStatus:
     status = str(order.get("status") or "").strip()
     if not status:
         raise OrderStatusError("status 누락")
-    if status not in OPEN_STATUSES and status != TERMINAL_FILLED and not status.startswith("canceled"):
+    if status not in KNOWN_STATUSES:
         raise OrderStatusError(f"모르는 status: {status!r}")
     filled = _required_decimal(order, "filled_base_amount")
     initial = _required_decimal(order, "initial_base_amount")
@@ -213,3 +222,12 @@ class LighterTrader:
             if int(order.get("client_order_index", -1)) == client_order_index:
                 return parse_order_status(order)
         return None
+
+    async def recent_orders(self, limit: int = 5) -> list[dict]:
+        """최근 끝난 주문 원본(accountInactiveOrders). 조회만 한다. verify-keys에서 실제 응답 형식 확인용."""
+        url = (f"{self.base_url}/api/v1/accountInactiveOrders?account_index={self.account_index}"
+               f"&limit={limit}")
+        data = await get_json(url, headers={"authorization": self._auth()})
+        if int(data.get("code", 200)) != 200:
+            raise RuntimeError(f"accountInactiveOrders code {data.get('code')}: {data.get('message')}")
+        return list(data.get("orders") or [])

@@ -30,7 +30,7 @@
 - 가격과 수량은 정수(값 x 10^decimals). decimals는 `GET /api/v1/orderBookDetails`에서 받는다. 마켓 ID와 decimals를 하드코딩하지 않는다.
 - `min_base_amount`, `min_quote_amount`를 지킨다.
 - 논스는 API 키별로 1씩 증가한다. 키 하나당 전송을 직렬화한다. 결과가 불확실하면 다시 서명하기 전에 tx 상태와 nextNonce부터 확인한다(중복 주문 방지).
-- 미확정 헷지를 시간 경과로 미체결 처리하지 않는다. 10초는 호가 일시정지 기준이다. 전송 전에 client_order_index와 함께 SQLite에 저장하고 재시작 시 복원한다. 해제는 `accountOrders`의 최종 상태(filled/canceled-*)와 포지션 정확 일치가 둘 다 확인될 때만 한다. 응답 필드가 빠졌거나 이상하면 미확정을 유지한다. DB 삭제/교체로 우회하지 않는다.
+- 미확정 헷지를 시간 경과로 미체결 처리하지 않는다. 10초는 호가 일시정지 기준이다. 전송 전에 client_order_index와 함께 SQLite에 저장하고 재시작 시 복원한다. 해제는 `accountOrders`의 최종 상태(filled 또는 SDK enum에 있는 canceled-* 목록. 접두어 판정 금지)와 포지션 정확 일치가 둘 다 확인될 때만 한다. 응답 필드가 빠졌거나 이상하면 미확정을 유지한다. DB 삭제/교체로 우회하지 않는다.
 - IOC는 `orderExpiry=0`, taker 주문의 `price`는 감수할 최악 가격이다.
 - `code: 200`은 접수일 뿐이다. 체결은 WS나 `GET /api/v1/tx`로 확인한다.
 - `clientOrderIndex`는 전 마켓에서 고유, 2^48-1 이하.

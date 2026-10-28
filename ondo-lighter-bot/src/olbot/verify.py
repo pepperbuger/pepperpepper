@@ -4,6 +4,7 @@
 - Ondo REST: 서명이 맞는지 (잔고, 포지션 조회)
 - Ondo WS: API 키 로그인
 - Lighter: API 키가 계정에 등록됐는지(check_client), 계정 조회, 주문 조회용 인증 토큰
+- Lighter 주문 응답 형식: 과거 주문 원본을 봇의 파서에 통과시키고, 주문 번호 조회로 같은 결과가 나오는지
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import json
 import websockets
 
 from olbot.config import Config, Secrets
+from olbot.lighter.client import OrderStatusError, parse_order_status
 from olbot.ondo.rest import OndoRest, ws_login_message
 from olbot.ratelimit import TokenBucket
 
@@ -27,6 +29,49 @@ async def _ondo_ws_login(url: str, key_id: str, secret: str, timeout: float = 10
                 return "ok"
             if msg.get("type") == "error":
                 return f"error: {msg}"
+
+
+async def _check_order_format(t, add) -> None:
+    """과거 주문 원본을 봇의 파서에 통과시키고, 봇이 쓰는 주문 번호 조회(accountOrders)로 같은 결과가 나오는지 본다.
+
+    주문은 내지 않는다. 과거 주문이 없으면 실패로 남긴다(형식을 확인하지 못한 채 live로 가지 않도록).
+    """
+    try:
+        recent = await t.recent_orders(5)
+    except Exception as e:
+        add("Lighter 주문 응답 형식", False, f"accountInactiveOrders 조회 실패: {e!r}")
+        return
+    if not recent:
+        add("Lighter 주문 응답 형식", False,
+            "이 계정에 끝난 주문 기록이 없어 실제 형식을 확인하지 못함. "
+            "Lighter 앱에서 최소 주문(10달러) 1건을 체결하고 포지션을 닫은 뒤 다시 실행")
+        return
+    parsed = []
+    for raw in recent:
+        try:
+            parsed.append(parse_order_status(raw))
+        except OrderStatusError as e:
+            add("Lighter 주문 응답 형식", False,
+                f"파서가 실제 주문을 거부: {e} (status={raw.get('status')!r}, 필드={sorted(raw)})")
+            return
+    add("Lighter 주문 응답 형식", True,
+        f"최근 주문 {len(parsed)}건 파싱 정상: " + ", ".join(f"{o.status} {o.filled}/{o.initial}" for o in parsed))
+    sample = next((o for o in parsed if o.client_order_index > 0), None)
+    if sample is None:
+        add("Lighter 주문 번호 조회", False,
+            "최근 주문에 client_order_index가 없어 봇이 쓰는 조회 경로를 확인하지 못함")
+        return
+    try:
+        again = await t.order_status(sample.client_order_index)
+    except Exception as e:
+        add("Lighter 주문 번호 조회", False, f"accountOrders 조회/파싱 실패: {e!r}")
+        return
+    if again != sample:
+        add("Lighter 주문 번호 조회", False,
+            f"주문 번호 {sample.client_order_index}: 기록 {sample} / 조회 결과 {again}")
+        return
+    add("Lighter 주문 번호 조회", True,
+        f"주문 번호 {sample.client_order_index}로 같은 결과 ({again.status} {again.filled}/{again.initial})")
 
 
 async def verify_keys(cfg: Config, s: Secrets) -> list[tuple[str, bool, str]]:
@@ -66,6 +111,9 @@ async def verify_keys(cfg: Config, s: Secrets) -> list[tuple[str, bool, str]]:
         add("Lighter 주문 조회 인증", True, "정상 (테스트 주문 번호 1: 없음)" if st is None else f"응답 {st}")
     except Exception as e:
         add("Lighter", False, f"{e!r} (계정 번호, 키 인덱스, 개인키, 네트워크(메인넷/테스트넷) 확인)")
+    else:
+        # 위 조회는 빈 목록이라 주문 파서를 타지 않는다. 실제 주문 기록으로 형식을 따로 확인한다.
+        await _check_order_format(t, add)
     finally:
         try:
             await t.close()
