@@ -49,6 +49,9 @@ class ReconnectingWS:
     def subscriptions(self) -> list[dict]:
         raise NotImplementedError
 
+    def connect_options(self) -> dict:
+        return {}
+
     def on_message(self, msg: dict, recv_ts: float) -> None:
         raise NotImplementedError
 
@@ -72,7 +75,8 @@ class ReconnectingWS:
         backoff = 1.0
         while not self._stop.is_set():
             try:
-                async with websockets.connect(self.url, ping_interval=None, max_size=2**22, close_timeout=3) as ws:
+                async with websockets.connect(self.url, ping_interval=None, max_size=2**22, close_timeout=3,
+                                              **self.connect_options()) as ws:
                     self._ws = ws
                     self.connected = True
                     self.connect_count += 1

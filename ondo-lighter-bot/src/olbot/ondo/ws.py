@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from olbot.market import MarketBoard, ondo_market_name, parse_ondo_top_of_book
 from olbot.wsbase import EventCallback, ReconnectingWS
+from olbot.ondo.transport import ws_connect_options
 
 
 class OndoPublicWS(ReconnectingWS):
@@ -16,6 +17,9 @@ class OndoPublicWS(ReconnectingWS):
     def __init__(self, url: str, board: MarketBoard, ping_sec: float, on_event: EventCallback | None = None):
         super().__init__(url, ping_sec, {"op": "ping"}, on_event)
         self.board = board
+
+    def connect_options(self) -> dict:
+        return ws_connect_options()
 
     def subscriptions(self) -> list[dict]:
         return [{

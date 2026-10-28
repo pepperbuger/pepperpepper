@@ -12,6 +12,7 @@ from typing import Callable
 
 from olbot.ondo.rest import signed_position, ws_login_message
 from olbot.wsbase import EventCallback, ReconnectingWS
+from olbot.ondo.transport import ws_connect_options
 
 FillCallback = Callable[[dict], None]
 
@@ -44,6 +45,9 @@ class OndoPrivateWS(ReconnectingWS):
     @property
     def ready(self) -> bool:
         return self.connected and self.logged_in and self.deadman_armed
+
+    def connect_options(self) -> dict:
+        return ws_connect_options()
 
     def private_subscriptions(self) -> list[dict]:
         return [

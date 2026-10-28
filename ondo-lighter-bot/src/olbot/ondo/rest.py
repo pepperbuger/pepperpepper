@@ -18,6 +18,7 @@ import urllib.request
 from decimal import Decimal
 
 from olbot.ratelimit import TokenBucket
+from olbot.ondo.transport import rest_opener
 
 
 class OndoError(Exception):
@@ -56,6 +57,7 @@ class OndoRest:
         self.secret = secret
         self.bucket = bucket
         self.timeout = timeout
+        self._opener = rest_opener()
 
     def _do(self, method: str, path: str, body: str) -> tuple[int, dict]:
         ts = str(int(time.time() * 1000))
@@ -70,7 +72,7 @@ class OndoRest:
             self.base_url + path, data=body.encode() if body else None, method=method, headers=headers
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with self._opener.open(req, timeout=self.timeout) as r:
                 return r.status, json.loads(r.read() or b"{}")
         except urllib.error.HTTPError as e:
             raw = e.read()

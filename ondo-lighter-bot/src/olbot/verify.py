@@ -17,11 +17,12 @@ import websockets
 from olbot.config import Config, Secrets
 from olbot.lighter.client import OrderStatusError, parse_order_status
 from olbot.ondo.rest import OndoRest, ws_login_message
+from olbot.ondo.transport import ws_connect_options
 from olbot.ratelimit import TokenBucket
 
 
 async def _ondo_ws_login(url: str, key_id: str, secret: str, timeout: float = 10.0) -> str:
-    async with websockets.connect(url, ping_interval=None, close_timeout=3) as ws:
+    async with websockets.connect(url, ping_interval=None, close_timeout=3, **ws_connect_options()) as ws:
         await ws.send(json.dumps(ws_login_message(key_id, secret)))
         while True:
             msg = json.loads(await asyncio.wait_for(ws.recv(), timeout))
@@ -44,7 +45,7 @@ async def _check_order_format(t, add) -> None:
     if not recent:
         add("Lighter 주문 응답 형식", False,
             "이 계정에 끝난 주문 기록이 없어 실제 형식을 확인하지 못함. "
-            "Lighter 앱에서 최소 주문(10달러) 1건을 체결하고 포지션을 닫은 뒤 다시 실행")
+            "인증 성공과 별개로 주문 형식은 미검증이며, 실제 주문 시험은 별도 승인 후 진행")
         return
     parsed = []
     for raw in recent:
