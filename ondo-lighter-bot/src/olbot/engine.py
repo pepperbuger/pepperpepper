@@ -364,11 +364,14 @@ class Engine:
                 for side, oid in ids.items():
                     if oid in actual and (actual[oid].market != self.ondo_meta[b]["market"] or actual[oid].side != side):
                         raise ValueError("열린 주문의 시장/방향이 추적과 다름")
+            confirmations = []
             for b in self.bases:
                 ids = self.order_ids[b]
                 missing = {side for side, oid in ids.items() if oid not in actual}
                 expected = set(ids.values())
-                extra = {oid for oid, row in actual.items() if row.market == self.ondo_meta[b]["market"]} - expected
+                exchange_ids = {oid for oid, row in actual.items() if row.market == self.ondo_meta[b]["market"]}
+                extra = exchange_ids - expected
+                confirmations.append(f"{b} tracked={len(ids)} open={len(expected & exchange_ids)} exchange_total={len(exchange_ids)}")
                 if missing or extra:
                     log.warning("호가 대사 불일치 %s: 거래소 누락=%d, 미추적 주문=%d", b, len(missing), len(extra))
                     self.ledger.record_event("engine", "quote_mismatch", f"{b} missing={len(missing)} extra={len(extra)}")
@@ -389,16 +392,23 @@ class Engine:
                 count = sum(row.market == market for row in actual.values())
                 log.warning("호가 대사 불일치 %s: 설정 밖 미추적 주문=%d", market, count)
                 self.ledger.record_event("engine", "quote_mismatch", f"{market} unmanaged={count}")
+            detail = " | ".join(confirmations)
+            log.info("호가 대사 확인: %s", detail)
+            self.ledger.record_event("engine", "quote_reconciled", detail)
 
     async def order_reconcile_loop(self) -> None:
+        due = time.monotonic() + ORDER_RECONCILE_SEC
         while not self.stop.is_set():
-            await asyncio.sleep(ORDER_RECONCILE_SEC)
+            await asyncio.sleep(max(0.0, due - time.monotonic()))
             if self.stop.is_set():
                 return
             try:
                 await self.reconcile_orders()
             except Exception as error:
                 log.warning("호가 대사 조회 실패: %s (추적 유지)", type(error).__name__)
+            due += ORDER_RECONCILE_SEC
+            if due <= time.monotonic():
+                due = time.monotonic() + ORDER_RECONCILE_SEC  # 지연된 주기를 몰아서 실행하지 않는다.
 
     async def hedge_loop(self) -> None:
         while not self.stop.is_set():

@@ -81,7 +81,7 @@ async def verify_keys(cfg: Config, s: Secrets) -> list[tuple[str, bool, str]]:
     def add(name: str, ok: bool, detail: str) -> None:
         results.append((name, ok, detail))
 
-    rest = OndoRest(cfg.ondo.rest_url, s.ondo_api_key_id, s.ondo_api_secret, TokenBucket(1.0, 2))
+    rest = OndoRest(cfg.ondo.rest_url, s.ondo_api_key_id, s.ondo_api_secret, TokenBucket(1.0, 1))
     try:
         bal = await rest.balance()
         add("Ondo REST 잔고", True, f"marginBalance {bal.get('marginBalance')} USDC, 사용 증거금 {bal.get('usedMargin')}")

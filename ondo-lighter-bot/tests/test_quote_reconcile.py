@@ -100,11 +100,24 @@ async def test_empty_snapshot_removes_both_legs(engine):
 async def test_matching_snapshot_preserves_tracking_without_requote_or_warning(engine,caplog):
     await engine.place('LIT',target(engine))
     original=engine.current['LIT']
-    await engine.reconcile_orders()
+    with caplog.at_level(logging.INFO):
+        await engine.reconcile_orders()
     await engine._quote_market('LIT',1001)
     assert engine.current['LIT'] is original and not engine.dirty
     assert len(engine.ondo_rest.sent)==2 and engine.ondo_rest.reads==1
     assert '호가 대사 불일치' not in caplog.text
+    assert '호가 대사 확인: LIT tracked=2 open=2 exchange_total=2' in caplog.text
+
+
+async def test_confirmation_excludes_missing_or_untracked_order_from_bot_open_count(engine,caplog):
+    await engine.place('LIT',target(engine))
+    del engine.ondo_rest.orders[engine.order_ids['LIT']['buy']]
+    engine.ondo_rest.orders['manual']=OpenOrder('manual','LIT-USD.P','buy')
+    with caplog.at_level(logging.INFO):
+        await engine.reconcile_orders()
+    assert '호가 대사 확인: LIT tracked=2 open=1 exchange_total=2' in caplog.text
+    rows=engine.ledger.db.execute("SELECT detail FROM events WHERE kind='quote_reconciled'").fetchall()
+    assert rows==[('LIT tracked=2 open=1 exchange_total=2',)]
 
 
 async def test_untracked_exchange_order_is_logged_but_not_adopted_or_canceled(engine,caplog):
@@ -229,13 +242,16 @@ async def test_loop_retries_only_after_60_seconds_and_keeps_tracking_on_failure(
     await engine.place('LIT',target(engine))
     original=engine.current['LIT']
     sleeps=[]
+    clock=[0.0]
     async def sleep(seconds):
         sleeps.append(seconds)
+        clock[0]+=seconds
         if len(sleeps)==3:
             engine.stop.set()
     calls=[]
     async def flaky():
         calls.append(1)
+        clock[0]+=5  # 조회가 5초 걸려도 다음 시작은 60초 간격이다.
         assert engine.current['LIT']==original
         if len(calls)==1:
             raise OSError('query failed')
@@ -246,9 +262,10 @@ async def test_loop_retries_only_after_60_seconds_and_keeps_tracking_on_failure(
         return dict(engine.ondo_rest.orders)
     engine.ondo_rest.open_orders=read
     monkeypatch.setattr('olbot.engine.asyncio.sleep',sleep)
+    monkeypatch.setattr('olbot.engine.time',SimpleNamespace(monotonic=lambda:clock[0]))
     with caplog.at_level(logging.WARNING):
         await engine.order_reconcile_loop()
-    assert sleeps==[60,60,60] and len(calls)==2
+    assert sleeps==[60,55,55] and len(calls)==2
     assert '호가 대사 조회 실패' in caplog.text and engine.current['LIT']==original
 
 
