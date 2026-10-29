@@ -91,6 +91,7 @@ async def test_deadman_pass_needs_positive_cancellation_evidence(tmp_path):
     now, sleep = clock()
     result = await trial.observe(rest, state, path, clock=now, sleep=sleep)
     assert result['resolved'] and result['deadman_verified']
+    assert json.loads(path.read_text())['server_timeout_cancel_confirmed'] is True
     assert not any(method != 'GET' for method,_,_ in rest.calls)
 
 
@@ -108,6 +109,7 @@ async def test_timeout_cancellation_fallback_is_not_a_deadman_pass(monkeypatch, 
     now, sleep = clock()
     result = await trial.observe(rest, state, path, clock=now, sleep=sleep)
     assert result['resolved'] and not result['deadman_verified']
+    assert json.loads(path.read_text())['server_timeout_cancel_confirmed'] is False
     deletes = [route for method,route,_ in rest.calls if method == 'DELETE']
     assert deletes == [trial.ORDER_PATH + 'probe_a']
 

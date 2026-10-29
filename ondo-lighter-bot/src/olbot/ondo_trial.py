@@ -61,11 +61,11 @@ def positive_decimal(value):
     return number
 
 
-def parse_order(raw, client_id, size, side='buy', *, cleanup=False):
+def parse_order(raw, client_id, size, side='buy', *, cleanup=False, time_in_force=None):
     if not isinstance(raw, dict):
         raise ValueError('주문 응답 형식 오류')
     if (raw['clientOrderId'] != client_id or raw['market'] != MARKET or raw['side'] != side or
-            raw['type'] != 'limit' or raw['timeInForce'] != ('IOC' if cleanup else 'GTC')):
+            raw['type'] != 'limit' or raw['timeInForce'] != (time_in_force or ('IOC' if cleanup else 'GTC'))):
         raise ValueError('주문 식별/속성 불일치')
     # 실제 진입 응답은 false인 reduceOnly를 생략한다. 수량 등 필수 필드는 계속 엄격하게 읽는다.
     # 정리 주문은 true라는 확인이 필요하므로 생략을 허용하지 않는다.
@@ -267,7 +267,8 @@ async def observe(rest, state, path, *, clock=time.monotonic, sleep=asyncio.slee
             except Exception:
                 pass
             await sleep(2)
-    state.update(observed_cancel_after_sec=round(elapsed, 3),
+    state.update(server_timeout_cancel_confirmed=bool(order and order['status']=='canceled' and order['deadman_reason']),
+                 observed_cancel_after_sec=round(elapsed, 3),
                  deadman_verified=bool(order and order['status'] == 'canceled' and order['deadman_reason'] and
                      Decimal(order['filled']) == 0 and state.get('resting_confirmed') and
                      state.get('worker_terminated') and not state.get('fallback_cancel_used') and elapsed <= 30))
@@ -348,7 +349,8 @@ async def _run(args):
                 pass
             return {'read_only':True,'phase':state['phase'],'order':order,
                     'deadman_verified':state.get('deadman_verified') is True,
-                    'server_timeout_cancel_confirmed':state.get('server_timeout_cancel_confirmed') is True}
+                    'server_timeout_cancel_confirmed':bool(state.get('server_timeout_cancel_confirmed') is True or
+                        (order and order['status']=='canceled' and order['deadman_reason']))}
     plan = await preflight(rest)
     if not args.execute:
         return {'read_only':True,'plan':plan}
