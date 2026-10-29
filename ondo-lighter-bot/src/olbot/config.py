@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field, fields
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -101,6 +102,12 @@ class StorageCfg:
 
 
 @dataclass
+class RewardsCfg:
+    # 공식 주간 공지를 확인해 만든 정책 파일. 빈 문자열은 기존 일반 봇 설정이다.
+    policy_path: str = ""
+
+
+@dataclass
 class Config:
     mode: str
     ondo: OndoCfg
@@ -112,6 +119,7 @@ class Config:
     storage: StorageCfg
     market_data: MarketDataCfg = field(default_factory=MarketDataCfg)
     path: Path | None = None
+    rewards: RewardsCfg = field(default_factory=RewardsCfg)
 
     @property
     def bases(self) -> list[str]:
@@ -185,7 +193,7 @@ def load_config(path: str | Path) -> Config:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise ConfigError("설정 파일 최상위는 mapping이어야 함")
-    sections = {"mode", "ondo", "lighter", "quoting", "hedging", "risk", "markets", "storage", "market_data"}
+    sections = {"mode", "ondo", "lighter", "quoting", "hedging", "risk", "markets", "storage", "market_data", "rewards"}
     unknown = sorted(set(raw) - sections)
     if unknown:
         raise ConfigError(f"알 수 없는 최상위 키 {unknown}")
@@ -203,6 +211,7 @@ def load_config(path: str | Path) -> Config:
         storage=_build(StorageCfg, raw.get("storage"), "storage"),
         market_data=_build(MarketDataCfg, raw.get("market_data"), "market_data"),
         path=path,
+        rewards=_build(RewardsCfg, raw.get("rewards"), "rewards"),
     )
     for m in cfg.markets:
         m.base = m.base.strip().upper()
@@ -272,6 +281,14 @@ def validate(cfg: Config) -> list[str]:
     ):
         if not url.startswith("wss://"):
             errs.append(f"{name}는 wss:// 로 시작해야 함")
+    if cfg.rewards.policy_path:
+        from olbot.rewards import policy_for_config
+        try:
+            reason = policy_for_config(cfg).block_reason(cfg.bases, time.time())
+            if reason:
+                errs.append(reason)
+        except (OSError, ValueError, KeyError, TypeError, ArithmeticError):
+            errs.append("rewards.policy_path: 공식 주간 정책 파일 오류")
     return errs
 
 

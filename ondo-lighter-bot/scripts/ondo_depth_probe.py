@@ -8,8 +8,9 @@ Ondo와 Lighter에 둘 다 상장된 퍼프 마켓마다
   - Lighter 24시간 거래량(헷지 유동성 참고용)
 을 뽑는다.
 
-유동성 리워드는 "+-25bps 안에 걸린 물량 중 내 비중"으로 나눠질 가능성이 높으므로,
-band 안 물량이 얇은 마켓일수록 같은 돈으로 더 큰 몫을 가져간다.
+주의: 이 구형 측정기는 호가 두께만 비교하며 유동성 보상 자격을 판정하지 않는다.
+2026-10-27 공식 주간 목록에 LIT/ENA는 없고 거리별 배분도 다르다.
+최신 근거는 docs/REWARD_WEEK_PLAN.md, Decimal 기반 관측은 olbot.reward_probe를 쓴다.
 
 사용법:
   python3 ondo_depth_probe.py                 # 겹치는 마켓 전체

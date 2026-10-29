@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import time
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from olbot.ledger import Ledger
@@ -25,16 +26,24 @@ def build_report(ledger: Ledger, since: float) -> str:
     hours = (time.time() - since) / 3600
     lines = [f"=== 운영 리포트: 최근 {hours:.1f}시간 ==="]
 
-    lines.append("\n[호가 노출] band 안에 걸려 있던 호가 (USD-시간)")
+    lines.append("\n[호가 노출] 계산호가 샘플의 band 내 USD-시간 (거래소 open·리워드 자격 보장 아님)")
     rows = db.execute(
-        """SELECT base, SUM(notional_usd * in_band * interval_s) / 3600.0, SUM(interval_s) / 3600.0, AVG(dist_bps)
-           FROM quote_snapshots WHERE ts >= ? GROUP BY base ORDER BY base""",
+        """SELECT base, price, size, in_band, interval_s, dist_bps
+           FROM quote_snapshots WHERE ts >= ? ORDER BY base""",
         (since,),
     ).fetchall()
-    total_usd_hours = 0.0
-    for base, usd_h, side_hours, avg_dist in rows:
-        total_usd_hours += usd_h or 0
-        lines.append(f"  {base:6} {usd_h or 0:>12,.0f} USD-시간   평균 거리 {avg_dist or 0:.1f}bps   (양쪽 합산 {side_hours:.1f}시간)")
+    exposure = {}
+    for base, price, size, band, interval, distance in rows:
+        a = exposure.setdefault(base, [Decimal(0), Decimal(0), Decimal(0), 0])
+        hours_d = Decimal(str(interval)) / 3600
+        a[0] += (_d(price) or Decimal(0)) * (_d(size) or Decimal(0)) * int(band) * hours_d
+        a[1] += hours_d
+        a[2] += _d(distance) or Decimal(0)
+        a[3] += 1
+    total_usd_hours = Decimal(0)
+    for base, (usd_h, side_hours, dist_sum, n) in exposure.items():
+        total_usd_hours += usd_h
+        lines.append(f"  {base:6} {usd_h:>12,.2f} USD-시간   평균 거리 {dist_sum/n:.1f}bps   (양쪽 합산 {side_hours:.1f}시간)")
     lines.append(f"  합계   {total_usd_hours:>12,.0f} USD-시간")
 
     lines.append("\n[체결] Ondo")
@@ -65,11 +74,22 @@ def build_report(ledger: Ledger, since: float) -> str:
 
     lines.append("\n[헷지] Lighter")
     hrows = db.execute(
-        "SELECT base, COUNT(*), SUM(CASE WHEN error != '' THEN 1 ELSE 0 END) FROM hedges WHERE ts >= ? GROUP BY base",
+        "SELECT base, filled, error FROM hedges WHERE ts >= ?",
         (since,),
     ).fetchall()
-    for base, n, errs in hrows:
-        lines.append(f"  {base:6} 헷지 주문 {n}건, 거절 {errs}건")
+    hedges = {}
+    for base, filled, error in hrows:
+        a = hedges.setdefault(base, {"sent": 0, "rejected": 0, "filled": 0, "other_final": 0})
+        if (error or "").startswith("final:"):
+            a["filled" if error == "final:filled" else "other_final"] += 1
+        else:
+            a["sent"] += 1
+            a["rejected"] += int(filled != "pending" and bool(error))
+    for base, a in sorted(hedges.items()):
+        lines.append(f"  {base:6} 전송 시도 {a['sent']}건, 즉시 거절 {a['rejected']}건, "
+                     f"최종 전량 체결 {a['filled']}건, 기타 최종 {a['other_final']}건")
+    pending = db.execute("SELECT COUNT(*) FROM pending_hedges").fetchone()[0]
+    lines.append(f"  현재 DB 미확정 헷지 {pending}건 (모든 계정 범위 합계)")
     if not hrows:
         lines.append("  헷지 없음")
 
@@ -83,14 +103,30 @@ def build_report(ledger: Ledger, since: float) -> str:
 
     lines.append("\n[리워드] 수동 입력분 (python -m olbot report add-reward ...)")
     rw = db.execute("SELECT week_start, week_end, usdc, points, note FROM rewards ORDER BY ts").fetchall()
-    total_usdc = Decimal(0)
     for ws, we, usdc, pts, note in rw:
-        total_usdc += _d(usdc) or Decimal(0)
+        try:
+            start = datetime.combine(date.fromisoformat(ws), datetime.min.time(), timezone.utc).timestamp()
+            end = datetime.combine(date.fromisoformat(we) + timedelta(days=1), datetime.min.time(), timezone.utc).timestamp()
+        except ValueError:
+            lines.append(f"  {ws}~{we}: 주간 날짜 오류, 정규화 제외")
+            continue
+        if end <= since or start > time.time():
+            continue
         lines.append(f"  {ws}~{we}: {usdc} USDC, {pts} 포인트 {note or ''}")
+        if since > start or time.time() < end:
+            lines.append("    조회 기간에 주간 전체가 포함되지 않아 리워드 정규화 제외")
+            continue
+        # 같은 리워드 주간의 노출만 사용한다. 다른 주의 리워드를 현재 노출로 나누지 않는다.
+        week_rows = db.execute(
+            "SELECT price,size,in_band,interval_s FROM quote_snapshots WHERE ts>=? AND ts<?", (start, end)
+        ).fetchall()
+        usd_h = sum(((_d(p) or Decimal(0)) * (_d(s) or Decimal(0)) * int(b) * Decimal(str(i)) / 3600
+                     for p, s, b, i in week_rows), Decimal(0))
+        if usd_h > 0:
+            value = (_d(usdc) or Decimal(0)) * 1000 / usd_h
+            lines.append(f"    같은 주 추정 노출 기준 1,000 USD-시간당 {value:.4f} USDC (입력 보상 종류·대상 확인 필요)")
     if not rw:
-        lines.append("  입력 없음")
-    elif total_usd_hours > 0:
-        lines.append(f"  1,000 USD-시간당 리워드(조회 기간 노출 기준 근사): {float(total_usdc) / (total_usd_hours / 1000):.4f} USDC")
+        lines.append("  입력 없음 — 미지급·미확인 보상을 수익 0으로 확정하지 않음")
 
     lines.append("\n[이벤트]")
     for source, kind, cnt in ledger.event_counts(since):

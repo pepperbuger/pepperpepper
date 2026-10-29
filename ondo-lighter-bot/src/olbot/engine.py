@@ -26,6 +26,7 @@ from olbot.ondo.ws import OndoPublicWS
 from olbot.quoter import TargetQuotes, QuoteSide, needs_requote, target_quotes, to_order_payloads
 from olbot.ratelimit import TokenBucket
 from olbot.risk import RiskInputs, evaluate, pending_pause_reason
+from olbot.rewards import policy_for_config
 
 log = logging.getLogger("olbot.engine")
 
@@ -68,10 +69,13 @@ class Engine:
         self.positions_ok_ts: float | None = None  # 마지막으로 양쪽 포지션 조회에 성공한 시각
         self.requests_sent = 0
         self.started = time.time()
+        self.reward_policy = policy_for_config(cfg)
 
     # ---------- 준비 ----------
 
     async def setup(self) -> None:
+        if self.live and self.reward_block_reason(time.time()):
+            raise RuntimeError(self.reward_block_reason(time.time()))
         if self.live:
             from olbot.trial import require_resolved_trial
 
@@ -121,8 +125,19 @@ class Engine:
         )
 
     async def live_startup(self) -> None:
+        if self.reward_block_reason(time.time()):
+            raise RuntimeError(self.reward_block_reason(time.time()))
         log.info("Lighter API 키 확인")
         await self.trader.connect()
+        if self.reward_policy:
+            # 새 주간 마켓으로 바꾸면서 이전 자산을 관리 범위 밖에 남기지 않는다.
+            op = await self.ondo_rest.positions()
+            lp = await self.trader.positions()
+            allowed_markets = {self.ondo_meta[b]["market"] for b in self.bases}
+            allowed_ids = {self.lighter_markets[b].market_id for b in self.bases}
+            if (any(q != 0 and m not in allowed_markets for m, q in op.items())
+                    or any(q != 0 and m not in allowed_ids for m, q in lp.items())):
+                raise RuntimeError("주간 후보 밖 기존 포지션이 있어 시작 차단: 별도 승인된 정리 필요")
         log.info("Ondo 주문 전부 취소")
         await self.ondo_rest.cancel_all()
         for b in self.bases:
@@ -135,6 +150,9 @@ class Engine:
             await self.hedger.hedge(b, self.lighter_mid(b))
 
     # ---------- 상태 ----------
+
+    def reward_block_reason(self, now: float) -> str | None:
+        return self.reward_policy.block_reason(self.bases, now) if self.reward_policy else None
 
     def ondo_mid(self, b: str) -> Decimal | None:
         q = self.board.states[b].ondo
@@ -257,7 +275,8 @@ class Engine:
         q = self.cfg.quoting
         mid = self.ondo_mid(b)
         pending_block = pending_pause_reason(self.hedger.overdue_pending(now)) if self.hedger else None
-        blocked = self.killed or self.paused or pending_block or (mid is None and "no_quote") or self.market_block_reason(b, now)
+        blocked = (self.killed or self.paused or pending_block or self.reward_block_reason(now)
+                   or (mid is None and "no_quote") or self.market_block_reason(b, now))
         if blocked:
             if self.current[b] is not None:
                 await self.pull_market(b, str(blocked))
@@ -319,6 +338,7 @@ class Engine:
             self.order_ids[b].clear()
             # 취소/요청 예산 대기 중에 미확정 주문이 오래됐을 수도 있다.
             if (self.killed or self.paused or self.stop.is_set()
+                    or self.reward_block_reason(time.time())
                     or (self.hedger and self.hedger.overdue_pending(time.time()))):
                 return
             payload = to_order_payloads(market, target)
@@ -444,6 +464,10 @@ class Engine:
     async def _risk_tick(self) -> None:
         r = self.cfg.risk
         now = time.time()
+        if self.live and self.reward_block_reason(now):
+            if not self.killed:
+                await self.kill(self.reward_block_reason(now))
+            return  # 호가 중단 후에도 독립 헷지 루프는 계속 돈다.
         ws_ok = (self.ondo_ws.connected and self.lighter_ws.connected
                  and self.ondo_ws.stale_for(now) < 65 and self.lighter_ws.stale_for(now) < 65)
         self.ws_bad_since = None if ws_ok else (self.ws_bad_since or now)

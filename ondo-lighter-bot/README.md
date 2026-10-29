@@ -16,6 +16,8 @@ Ondo Perps에 지정가(post-only) 호가를 걸어 USDC 리워드와 포인트�
 
 ## 진행 상황
 
+2026-10-30 공식 리워드 재확인: **이번 주 LIT·ENA는 유동성 보상 대상이 아니다.** 기존 18bps는 대상 마켓에서도 5% 배분 구간이다. 기존 실주문 봇은 정지했으며 [1주 측정 근거·후보·재개 조건](docs/REWARD_WEEK_PLAN.md)을 먼저 확인한다. BTC·ETH 후보는 `config.reward-week.example.yaml`의 dry_run이며 자동 전환하지 않는다. 공개 GET 전용 `python -m olbot.reward_probe`를 추가했고 정책 만료 live 차단·보고서 회귀 검증을 포함해 작업본·설치본 테스트 262개와 인증 8개가 통과했다. 10월 30일 08:13~11월 6일 08:13 KST 공개 관측을 시작했으며 실주문은 없다.
+
 주 담당은 Codex다. 인수 시점의 최신 상태와 남은 확인 항목은 [HANDOFF의 Codex 인수 상태](docs/HANDOFF.md#codex-인수-상태-2026-10-29)에 기록했다. `.env`와 `data/`의 기존 안전 기록을 보존하고, 실제 주문은 별도 승인 후 진행한다.
 
 | 단계 | 상태 |

@@ -1,0 +1,9 @@
+{
+  "source": "https://app.ondoperps.xyz/announcements/usdc-rewards-upgrade",
+  "checked_utc": "2026-10-29T23:03:49+00:00",
+  "starts_utc": "2026-10-27T00:00:00+00:00",
+  "ends_utc": "2026-11-03T00:00:00+00:00",
+  "allowed_bases": ["BTC", "ETH"],
+  "per_market_usdc": "5000",
+  "note": "전체 20개 중 24시간 기초시장 거래가 가능한 암호화폐 두 개만 허용한 부분집합. 다음 주 자동 연장 금지. 0~5bps 85%, 6~10bps 10%, 11~25bps 5%."
+}
