@@ -1,6 +1,7 @@
 """실제 주문 없이 단발 시험의 중복 방지·체결 대사·정리 한도를 검사한다."""
 from decimal import Decimal as D
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,35 @@ from olbot.lighter.client import LighterMarket, OrderStatus
 
 
 MARKET=LighterMarket('LIT',17,2,4,D('.01'),D('10'))
+
+
+@pytest.mark.parametrize('label,closing',[('entry',False),('close',True)])
+def test_actual_ondo_filled_ioc_response(label,closing):
+    raw=json.loads((Path(__file__).parent/f'fixtures/ondo-filled-ioc-{label}.json').read_text())
+    result=pair.ondo.parse_order(raw,'fixture_'+label,'4','sell' if closing else 'buy',
+                                 cleanup=closing,time_in_force='IOC')
+    assert result['status']=='fullyfilled' and D(result['filled'])==4
+    if closing:
+        assert raw['reduceOnly'] is True
+    else:
+        assert 'reduceOnly' not in raw
+
+
+@pytest.mark.parametrize('label,is_sell,coi,before,after',[
+    ('entry',True,43,'0','-4'),('close',False,44,'-4','0')])
+async def test_actual_lighter_filled_ioc_passes_identity_quantity_and_position_confirmation(
+        monkeypatch,label,is_sell,coi,before,after):
+    raw=json.loads((Path(__file__).parent/f'fixtures/lighter-filled-ioc-{label}.json').read_text())
+    async def get(url,token=None):
+        assert f'client_order_indexes={coi}' in url
+        return {'orders':[raw]}
+    async def account():
+        return {'positions':[{'market_id':120,'position':str(abs(D(after))),'sign':-1 if D(after)<0 else 1}]}
+    trader=SimpleNamespace(account_index=7,_auth=lambda:'dummy-token',account=account)
+    monkeypatch.setattr(pair.lighter,'get',get)
+    order=await pair.lighter.final_order(trader,{'market_id':120,'size':'4','position_before':before},coi,is_sell)
+    assert order.status=='filled' and order.filled==order.initial==4
+    assert raw['reduce_only'] is (label=='close')
 
 
 def plan():
