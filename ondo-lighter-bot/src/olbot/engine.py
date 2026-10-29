@@ -29,10 +29,10 @@ from olbot.risk import RiskInputs, evaluate, pending_pause_reason
 
 log = logging.getLogger("olbot.engine")
 
-REQUOTE_COST = 2  # 마켓 단위 전체 취소 1회 + 일괄 생성 1회
-FILL_SETTLE_SEC = 5.0
+FILL_SETTLE_SEC = 5.0  # 체결 직후 이 시간 동안 REST 포지션 스냅샷으로 덮어쓰지 않는다.
+ORDER_RECONCILE_SEC = 60.0
 # 주문 상태를 모르는 마켓. None(확실히 없음)과 구분해서, 다음 루프가 취소부터 하게 만든다.
-UNKNOWN_QUOTES = TargetQuotes(None, None)  # 체결 직후 이 시간 동안은 REST 포지션 스냅샷으로 덮어쓰지 않는다
+UNKNOWN_QUOTES = TargetQuotes(None, None)
 
 
 class Engine:
@@ -45,8 +45,11 @@ class Engine:
         self.mcfg = {m.base: m for m in cfg.markets}
         self.board = MarketBoard(self.bases)
         self.trackers = {b: BasisTracker(cfg.quoting.basis_window_sec) for b in self.bases}
-        self.bucket = TokenBucket(cfg.ondo.rest_rate_per_sec, capacity=5)
+        # 대사·취소·생성이 같은 버킷을 공유한다. 시작 시에도 초당 1회를 넘는 버스트를 허용하지 않는다.
+        self.bucket = TokenBucket(min(cfg.ondo.rest_rate_per_sec, 1.0), capacity=1)
         self.current: dict[str, TargetQuotes | None] = {b: None for b in self.bases}
+        self.order_ids: dict[str, dict[str, str]] = {b: {} for b in self.bases}
+        self.quote_lock = asyncio.Lock()  # 조회 스냅샷과 주문 교체/취소를 직렬화한다.
         self.dirty: set[str] = set()
         self.last_fill_ts: dict[str, float] = {}
         self.killed: str | None = None
@@ -203,10 +206,15 @@ class Engine:
         await self.cancel_all_quotes()
 
     async def cancel_all_quotes(self, attempts: int = 1) -> bool:
+        async with self.quote_lock:
+            return await self._cancel_all_quotes(attempts)
+
+    async def _cancel_all_quotes(self, attempts: int) -> bool:
         """Ondo 주문 전부 취소. 성공했을 때만 로컬 추적을 지운다 (실패하면 거래소에 남아 있을 수 있다)."""
         if not self.live or self.ondo_rest is None:
             for b in self.bases:
                 self.current[b] = None
+                self.order_ids[b].clear()
             return True
         for i in range(attempts):
             try:
@@ -214,6 +222,7 @@ class Engine:
                 self.requests_sent += 1
                 for b in self.bases:
                     self.current[b] = None
+                    self.order_ids[b].clear()
                 return True
             except Exception as e:
                 log.error("cancel_all 실패 (%d/%d): %r", i + 1, attempts, e)
@@ -269,11 +278,16 @@ class Engine:
             self.current[b], target, mid, q.band_bps, q.requote_threshold_bps
         ):
             return
-        if self.live and self.bucket.available() < REQUOTE_COST + 1:
+        # 나머지 취소/생성 요청도 REST 클라이언트가 동일한 1초 버킷에서 기다린다.
+        if self.live and self.bucket.available() < 1:
             return
         await self.place(b, target)
 
     async def pull_market(self, b: str, reason: str) -> bool:
+        async with self.quote_lock:
+            return await self._pull_market(b, reason)
+
+    async def _pull_market(self, b: str, reason: str) -> bool:
         """한 마켓의 호가를 내린다. 실패하면 추적을 남겨 다음 루프에서 다시 시도한다."""
         log.info("%s 호가 내림: %s", b, reason)
         self.requests_sent += 1
@@ -285,9 +299,14 @@ class Engine:
                 self.ledger.record_event("engine", "cancel_failed", f"{b} {e!r}"[:200])
                 return False
         self.current[b] = None
+        self.order_ids[b].clear()
         return True
 
     async def place(self, b: str, target: TargetQuotes) -> None:
+        async with self.quote_lock:
+            await self._place(b, target)
+
+    async def _place(self, b: str, target: TargetQuotes) -> None:
         market = self.ondo_meta[b]["market"]
         self.dirty.discard(b)
         self.requests_sent += 2
@@ -297,6 +316,7 @@ class Engine:
         try:
             await self.ondo_rest.cancel_all(market)
             self.current[b] = None
+            self.order_ids[b].clear()
             # 취소/요청 예산 대기 중에 미확정 주문이 오래됐을 수도 있다.
             if (self.killed or self.paused or self.stop.is_set()
                     or (self.hedger and self.hedger.overdue_pending(time.time()))):
@@ -305,25 +325,80 @@ class Engine:
             if not payload:
                 return
             added, failed = await self.ondo_rest.create_batch(payload)
+            bid = ask = None
+            ids = {}
+            for o in added:
+                side, oid = o["side"], o["orderId"]
+                if (side not in {"buy", "sell"} or side in ids or not isinstance(oid, str) or
+                        not oid.strip() or oid in ids.values() or o["market"] != market):
+                    raise ValueError("생성 응답의 주문 식별값 오류")
+                ids[side] = oid
+                s = QuoteSide(Decimal(o["price"]), Decimal(o["size"]))
+                if side == "buy":
+                    bid = s
+                else:
+                    ask = s
         except Exception as e:
             # 요청이 거래소에 닿았는지 모른다. 비어 있다고 보지 않고 "확인 필요"로 남겨
             # 다음 재호가나 정지 때 마켓 단위 취소부터 하게 한다.
             log.error("%s 호가 실패: %r", b, e)
             self.current[b] = UNKNOWN_QUOTES
             return
-        bid = ask = None
-        for o in added:
-            s = QuoteSide(Decimal(o["price"]), Decimal(o["size"]))
-            if o.get("side") == "buy":
-                bid = s
-            else:
-                ask = s
         for f in failed:
             log.warning("%s 주문 거절: %s", b, f)
         self.current[b] = TargetQuotes(bid, ask)
+        self.order_ids[b] = ids
         if (self.killed or self.paused or self.stop.is_set()
                 or (self.hedger and self.hedger.overdue_pending(time.time()))):
-            await self.pull_market(b, self.killed or self.paused or "stopping or unconfirmed hedge")
+            await self._pull_market(b, self.killed or self.paused or "stopping or unconfirmed hedge")
+
+    async def reconcile_orders(self) -> None:
+        """거래소에 없는 추적 주문만 제거한다. 재호가는 기존 위험 판단/취소 후 생성 경로를 따른다."""
+        if not self.live:
+            return
+        async with self.quote_lock:
+            self.requests_sent += 1
+            actual = await self.ondo_rest.open_orders()
+            # 응답 식별값이 충돌하면 일부 마켓도 변경하지 않는다.
+            for b, ids in self.order_ids.items():
+                for side, oid in ids.items():
+                    if oid in actual and (actual[oid].market != self.ondo_meta[b]["market"] or actual[oid].side != side):
+                        raise ValueError("열린 주문의 시장/방향이 추적과 다름")
+            for b in self.bases:
+                ids = self.order_ids[b]
+                missing = {side for side, oid in ids.items() if oid not in actual}
+                expected = set(ids.values())
+                extra = {oid for oid, row in actual.items() if row.market == self.ondo_meta[b]["market"]} - expected
+                if missing or extra:
+                    log.warning("호가 대사 불일치 %s: 거래소 누락=%d, 미추적 주문=%d", b, len(missing), len(extra))
+                    self.ledger.record_event("engine", "quote_mismatch", f"{b} missing={len(missing)} extra={len(extra)}")
+                if not missing or self.current[b] is UNKNOWN_QUOTES:
+                    continue
+                cur = self.current[b]
+                if cur is None:
+                    continue
+                bid = None if "buy" in missing else cur.bid
+                ask = None if "sell" in missing else cur.ask
+                for side in missing:
+                    del ids[side]
+                self.current[b] = TargetQuotes(bid, ask) if bid or ask else None
+                self.dirty.add(b)
+            managed = {self.ondo_meta[b]["market"] for b in self.bases}
+            untracked_markets = {row.market for row in actual.values()} - managed
+            for market in sorted(untracked_markets):
+                count = sum(row.market == market for row in actual.values())
+                log.warning("호가 대사 불일치 %s: 설정 밖 미추적 주문=%d", market, count)
+                self.ledger.record_event("engine", "quote_mismatch", f"{market} unmanaged={count}")
+
+    async def order_reconcile_loop(self) -> None:
+        while not self.stop.is_set():
+            await asyncio.sleep(ORDER_RECONCILE_SEC)
+            if self.stop.is_set():
+                return
+            try:
+                await self.reconcile_orders()
+            except Exception as error:
+                log.warning("호가 대사 조회 실패: %s (추적 유지)", type(error).__name__)
 
     async def hedge_loop(self) -> None:
         while not self.stop.is_set():
@@ -477,6 +552,7 @@ class Engine:
                 ws_tasks.append(asyncio.create_task(self.private_ws.run()))
                 await self._wait_for_login(timeout=15)
                 loop_tasks.append(asyncio.create_task(self.hedge_loop()))
+                loop_tasks.append(asyncio.create_task(self.order_reconcile_loop()))
             loop_tasks += [asyncio.create_task(self.quote_loop()), asyncio.create_task(self.risk_loop()),
                            asyncio.create_task(self.record_loop())]
             log.info("시작: %s", "실운영" if self.live else "dry_run (주문 없음)")

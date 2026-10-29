@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import hashlib
 import hmac
 import json
@@ -26,6 +27,35 @@ class OndoError(Exception):
         super().__init__(f"HTTP {status} {error_code}: {message}")
         self.status = status
         self.error_code = error_code
+
+
+@dataclass(frozen=True)
+class OpenOrder:
+    order_id: str
+    market: str
+    side: str
+
+
+def parse_open_orders(data: dict, limit: int = 1000) -> dict[str, OpenOrder]:
+    """완전한 열린 주문 스냅샷만 허용한다. 잘린 목록은 누락 판정에 쓰지 않는다."""
+    if not isinstance(data, dict) or data.get("success") is not True:
+        raise ValueError("열린 주문 조회 성공을 확인하지 못함")
+    rows = data["result"]
+    page = data.get("pageInfo")
+    if (not isinstance(rows, list) or len(rows) >= limit or
+            (page is not None and (not isinstance(page, dict) or page.get("nextCursor")))):
+        raise ValueError("열린 주문 목록이 불완전하여 대사를 보류한다")
+    if page is not None and page.get("nextCursor") is not None and not isinstance(page["nextCursor"], str):
+        raise ValueError("열린 주문 페이지 식별값 오류")
+    result = {}
+    for row in rows:
+        oid, market, side = row["orderId"], row["market"], row["side"]
+        if (not isinstance(oid, str) or not oid.strip() or oid in result or
+                not isinstance(market, str) or not market.strip() or
+                side not in {"buy", "sell"} or row["status"] != "open"):
+            raise ValueError("열린 주문 응답 식별값/상태 오류")
+        result[oid] = OpenOrder(oid, market, side)
+    return result
 
 
 def sign(secret: str, timestamp_ms: str, method: str, path_with_query: str, body: str) -> str:
@@ -82,6 +112,10 @@ class OndoRest:
                 return e.code, {"success": False, "error_code": "non_json", "error": raw[:200].decode(errors="replace")}
 
     async def request(self, method: str, path: str, params: dict | None = None, payload: dict | None = None):
+        data = await self._request_response(method, path, params, payload)
+        return data.get("result")
+
+    async def _request_response(self, method: str, path: str, params: dict | None = None, payload: dict | None = None):
         if params:
             path = path + "?" + urllib.parse.urlencode(params, safe=",:")
         body = json.dumps(payload, separators=(",", ":")) if payload is not None else ""
@@ -89,7 +123,12 @@ class OndoRest:
         status, data = await asyncio.to_thread(self._do, method, path, body)
         if status >= 400 or data.get("success") is False:
             raise OndoError(status, str(data.get("error_code", "")), str(data.get("error", ""))[:300])
-        return data.get("result")
+        return data
+
+    async def open_orders(self) -> dict[str, OpenOrder]:
+        """GET /v1/perps/orders?status=open&limit=1000 (공식 Get Orders 명세)."""
+        response = await self._request_response("GET", "/v1/perps/orders", {"status": "open", "limit": 1000})
+        return parse_open_orders(response)
 
     async def balance(self) -> dict:
         return await self.request("GET", "/v1/perps/balance")
