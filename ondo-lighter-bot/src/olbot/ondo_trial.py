@@ -65,9 +65,14 @@ def parse_order(raw, client_id, size, side='buy', *, cleanup=False):
     if not isinstance(raw, dict):
         raise ValueError('주문 응답 형식 오류')
     if (raw['clientOrderId'] != client_id or raw['market'] != MARKET or raw['side'] != side or
-            raw['type'] != 'limit' or raw['timeInForce'] != ('IOC' if cleanup else 'GTC') or
-            type(raw['reduceOnly']) is not bool or raw['reduceOnly'] != cleanup):
+            raw['type'] != 'limit' or raw['timeInForce'] != ('IOC' if cleanup else 'GTC')):
         raise ValueError('주문 식별/속성 불일치')
+    # 실제 진입 응답은 false인 reduceOnly를 생략한다. 수량 등 필수 필드는 계속 엄격하게 읽는다.
+    # 정리 주문은 true라는 확인이 필요하므로 생략을 허용하지 않는다.
+    if cleanup and 'reduceOnly' not in raw:
+        raise ValueError('정리 주문 reduceOnly 확인 불가')
+    if 'reduceOnly' in raw and (type(raw['reduceOnly']) is not bool or raw['reduceOnly'] != cleanup):
+        raise ValueError('reduceOnly 속성 불일치')
     original = positive_decimal(raw['size'])
     filled = Decimal(str(raw['filledSize']))
     if original != Decimal(size) or not filled.is_finite() or not 0 <= filled <= original:
@@ -79,7 +84,7 @@ def parse_order(raw, client_id, size, side='buy', *, cleanup=False):
         raise ValueError('전량 체결 상태와 수량 불일치')
     reason = raw.get('cancelReason')
     return {'status': status, 'filled': str(filled),
-            'deadman_reason': reason == 'cancelAfterTimeout'}
+            'deadman_reason': reason in {'cancelAfterTimeout', 'cancelaftertimeout'}}
 
 
 def parse_ws_event(message):
@@ -103,8 +108,18 @@ class ProbeWS(OndoPrivateWS):
         event = parse_ws_event(msg)
         if event is not None:
             self.state.setdefault('ws_ack_messages', []).append(event)
+            self.state['last_frame_monotonic'] = time.monotonic()
             save(self.path, self.state)
         super().on_message(msg, recv_ts)
+
+    async def _ping_loop(self, ws):
+        while not self.deadman_armed:
+            await asyncio.sleep(.1)
+        while True:
+            await asyncio.sleep(self.ping_sec)
+            await ws.send(json.dumps(self.ping_payload))
+            self.state['last_frame_monotonic'] = time.monotonic()
+            save(self.path, self.state)
 
 
 async def quote():
@@ -192,6 +207,8 @@ async def worker_main(env_path, path):
         save(path, state)
         try:
             raw = await rest.request('POST', '/v1/perps/orders', payload=payload)
+            state['post_response_received'] = True
+            save(path, state)
             order = parse_order(raw, state['entry_id'], '1')
             raw = await rest.request('GET', ORDER_PATH + state['entry_id'])
             order = parse_order(raw, state['entry_id'], '1')
@@ -303,7 +320,7 @@ async def observe(rest, state, path, *, clock=time.monotonic, sleep=asyncio.slee
             'observed_cancel_after_sec':state['observed_cancel_after_sec']}
 
 
-async def run(args):
+async def _run(args):
     cfg, secrets = load_config(args.config), load_secrets(args.env)
     if cfg.ondo.rest_url.rstrip('/') != BASE or cfg.ondo.ws_url != WS:
         raise ValueError('승인 대상 Ondo 메인넷 주소 불일치')
@@ -311,16 +328,27 @@ async def run(args):
     if args.execute and (args.approve_max_entry_usd != '5' or not args.approve_deadman or not args.approve_cleanup):
         raise ValueError('5 USD 진입·계정 전체 데드맨·비상 취소/정리 승인 플래그가 필요하다')
     rest = make_rest(secrets)
+    previous = None
     if path.exists():
         state = json.loads(path.read_text(encoding='utf-8'))
-        if args.execute or state['scope_hash'] != scope(secrets):
+        if state['scope_hash'] != scope(secrets):
+            raise ValueError('계정 범위 불일치')
+        if args.execute and getattr(args,'retry_resolved',False):
+            if (state.get('phase') != 'resolved' or state.get('deadman_verified') is True or
+                    not state.get('server_timeout_cancel_confirmed') or Decimal(state.get('entry_filled','-1')) != 0):
+                raise ValueError('주문이 안전하게 종료되고 실패 원인이 확인된 시험만 재시험 가능')
+            previous = state
+        elif args.execute:
             raise ValueError('기존 기록 보존 필요. 새 주문을 보내지 않는다')
-        order = None
-        try:
-            order = await query_entry(rest, state)
-        except Exception:
-            pass
-        return {'read_only':True,'phase':state['phase'],'order':order}
+        else:
+            order = None
+            try:
+                order = await query_entry(rest, state)
+            except Exception:
+                pass
+            return {'read_only':True,'phase':state['phase'],'order':order,
+                    'deadman_verified':state.get('deadman_verified') is True,
+                    'server_timeout_cancel_confirmed':state.get('server_timeout_cancel_confirmed') is True}
     plan = await preflight(rest)
     if not args.execute:
         return {'read_only':True,'plan':plan}
@@ -328,17 +356,29 @@ async def run(args):
         raise ValueError('증거금 또는 기존 포지션/주문 조건 미충족')
     state = {'phase':'prepared','entry_id':'olbot_dms_' + uuid.uuid4().hex,
              'scope_hash':scope(secrets),'plan':plan,'order_attempted':False}
-    save(path, state, first=True)
+    if previous is not None:
+        archive = path.parent/'trial-history'/('ondo-' + hashlib.sha256(previous['entry_id'].encode()).hexdigest() + '.json')
+        if archive.exists():
+            if json.loads(archive.read_text(encoding='utf-8')) != previous:
+                raise ValueError('이전 시험 보관 기록이 다르다')
+        else:
+            save(archive, previous, first=True)
+        save(path, state)
+    else:
+        save(path, state, first=True)
     # 프로세스 간 REST 소유권을 넘길 때 마지막 요청과 최소 1초를 띄운다.
     await asyncio.sleep(1.05)
     process = multiprocessing.get_context('spawn').Process(target=worker, args=(str(Path(args.env).resolve()),str(path)), daemon=True)
     process.start()
     forced_termination = False
     try:
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 45
         while process.is_alive() and time.monotonic() < deadline:
             state = json.loads(path.read_text(encoding='utf-8'))
-            if state['phase'] in {'resting','entry_terminal','entry_unknown'}:
+            if state['phase'] in {'entry_terminal','entry_unknown'}:
+                break
+            frame_age = time.monotonic()-state.get('last_frame_monotonic',0)
+            if state['phase']=='resting' and 5 <= frame_age < 8:
                 break
             await asyncio.sleep(.2)
     finally:
@@ -365,6 +405,22 @@ async def run(args):
     return await observe(rest, state, path)
 
 
+async def run(args):
+    if not args.execute:
+        return await _run(args)
+    cfg = load_config(args.config)
+    lock = path_for(cfg).resolve().with_suffix('.lock')
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    # 재시험도 첫 시험과 마찬가지로 동시에 두 번 전송되지 않게 막는다.
+    with lock.open('x', encoding='utf-8') as file:
+        file.write('exclusive order trial\n')
+        file.flush()
+    try:
+        return await _run(args)
+    finally:
+        lock.unlink()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='config.yaml')
@@ -373,6 +429,7 @@ def main():
     parser.add_argument('--approve-max-entry-usd')
     parser.add_argument('--approve-deadman', action='store_true')
     parser.add_argument('--approve-cleanup', action='store_true')
+    parser.add_argument('--retry-resolved', action='store_true', help='별도 승인된 재시험: 종료된 실패 기록을 보존하고 새 번호 사용')
     args = parser.parse_args()
     logging.disable(logging.CRITICAL)
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):

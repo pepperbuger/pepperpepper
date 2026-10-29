@@ -1,5 +1,6 @@
 from decimal import Decimal
 import asyncio
+from pathlib import Path
 import json
 from types import SimpleNamespace
 
@@ -207,7 +208,8 @@ async def test_controller_terminates_worker_before_observation(monkeypatch,tmp_p
             self.alive=True
             state=json.loads(open(self.path,encoding='utf-8').read())
             assert state['phase']=='prepared' and not state['order_attempted']
-            state.update(phase='resting',order_attempted=True,resting_confirmed=True)
+            state.update(phase='resting',order_attempted=True,resting_confirmed=True,
+                         last_frame_monotonic=trial.time.monotonic()-6)
             trial.save(trial.Path(self.path),state)
         def is_alive(self):
             return self.alive
@@ -253,3 +255,102 @@ def test_failed_deadman_has_failure_exit_status_even_if_order_is_resolved(monkey
     monkeypatch.setattr(sys,'argv',['test','--execute','--approve-max-entry-usd','5',
                                   '--approve-deadman','--approve-cleanup'])
     assert trial.main()==1
+
+
+def test_actual_ondo_timeout_response_omits_false_reduce_only():
+    raw=json.loads((Path(__file__).parent/'fixtures/ondo-deadman-canceled.json').read_text())
+    assert 'reduceOnly' not in raw and raw['cancelReason']=='cancelaftertimeout'
+    parsed=trial.parse_order(raw,'probe_a','1')
+    assert parsed=={'status':'canceled','filled':'0','deadman_reason':True}
+
+
+def test_actual_ondo_websocket_ack_messages():
+    messages=json.loads((Path(__file__).parent/'fixtures/ondo-deadman-acks.json').read_text())
+    assert [trial.parse_ws_event(message) for message in messages]==[
+        {'type':'loggedIn'},{'type':'subscribed','channel':'cancelAllOrdersAfterPerps'}]
+
+
+def test_cleanup_still_requires_explicit_reduce_only_true():
+    row=raw_order(side='sell',timeInForce='IOC')
+    del row['reduceOnly']
+    with pytest.raises(ValueError,match='정리 주문'):
+        trial.parse_order(row,'probe_a','1','sell',cleanup=True)
+
+
+async def test_exclusive_lock_does_not_remove_other_running_trial_lock(monkeypatch,tmp_path):
+    cfg=SimpleNamespace(storage=SimpleNamespace(sqlite_path=tmp_path/'olbot.sqlite'))
+    lock=trial.path_for(cfg).with_suffix('.lock')
+    lock.write_text('other trial')
+    monkeypatch.setattr(trial,'load_config',lambda _:cfg)
+    with pytest.raises(FileExistsError):
+        await trial.run(SimpleNamespace(config='unused',execute=True))
+    assert lock.read_text()=='other trial'
+
+
+def retry_setup(monkeypatch,tmp_path,changes=None):
+    cfg=SimpleNamespace(ondo=SimpleNamespace(rest_url=trial.BASE,ws_url=trial.WS),
+                         storage=SimpleNamespace(sqlite_path=tmp_path/'olbot.sqlite'))
+    secrets=SimpleNamespace(ondo_api_key_id='test-key')
+    old={'phase':'resolved','scope_hash':trial.scope(secrets),'entry_id':'old_probe',
+          'deadman_verified':False,'server_timeout_cancel_confirmed':True,'entry_filled':'0',**(changes or {})}
+    path=trial.path_for(cfg)
+    trial.save(path,old,first=True)
+    monkeypatch.setattr(trial,'load_config',lambda _:cfg)
+    monkeypatch.setattr(trial,'load_secrets',lambda _:secrets)
+    monkeypatch.setattr(trial,'make_rest',lambda _:object())
+    args=SimpleNamespace(config='unused',env='unused',execute=True,approve_max_entry_usd='5',
+                         approve_deadman=True,approve_cleanup=True,retry_resolved=True)
+    return path,old,args
+
+
+async def test_retry_preserves_previous_record_before_new_prepared_record(monkeypatch,tmp_path):
+    path,old,args=retry_setup(monkeypatch,tmp_path)
+    async def preflight(_):
+        return {'size':'1','price':'2.6','sufficient_margin':True,'no_positions':True,'no_active_orders':True}
+    async def sleep(seconds):
+        pass
+    def stop_before_start(**kwargs):
+        raise RuntimeError('stop before any process starts')
+    monkeypatch.setattr(trial,'preflight',preflight)
+    monkeypatch.setattr(trial,'asyncio',SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(trial,'multiprocessing',SimpleNamespace(get_context=lambda _:SimpleNamespace(Process=stop_before_start)))
+    with pytest.raises(RuntimeError,match='stop before'):
+        await trial.run(args)
+    archived=list((tmp_path/'trial-history').glob('*.json'))
+    assert len(archived)==1 and json.loads(archived[0].read_text())==old
+    prepared=json.loads(path.read_text())
+    assert prepared['entry_id']!=old['entry_id'] and not prepared['order_attempted']
+    assert not path.with_suffix('.lock').exists()
+
+
+@pytest.mark.parametrize('changes',[{'phase':'entry_unknown'},{'entry_filled':'1'},
+    {'server_timeout_cancel_confirmed':False},{'deadman_verified':True}])
+async def test_retry_refuses_unresolved_filled_or_already_passed_record(monkeypatch,tmp_path,changes):
+    path,old,args=retry_setup(monkeypatch,tmp_path,changes)
+    with pytest.raises(ValueError,match='재시험 가능'):
+        await trial.run(args)
+    assert json.loads(path.read_text())==old
+
+
+async def test_probe_heartbeat_starts_after_deadman_ack(monkeypatch,tmp_path):
+    state={}
+    path=tmp_path/'probe.json'
+    trial.save(path,state,first=True)
+    client=SimpleNamespace(deadman_armed=False,ping_sec=10,ping_payload={'op':'ping'},state=state,path=path)
+    sleeps=[]
+    sent=[]
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps)==1:
+            assert not client.deadman_armed and not sent
+            client.deadman_armed=True
+        elif len(sleeps)==3:
+            raise asyncio.CancelledError()
+    async def send(raw):
+        assert client.deadman_armed
+        sent.append(json.loads(raw))
+    monkeypatch.setattr(trial,'asyncio',SimpleNamespace(sleep=sleep))
+    with pytest.raises(asyncio.CancelledError):
+        await trial.ProbeWS._ping_loop(client,SimpleNamespace(send=send))
+    assert sleeps==[.1,10,10] and sent==[{'op':'ping'}]
+    assert json.loads(path.read_text())['last_frame_monotonic']>0

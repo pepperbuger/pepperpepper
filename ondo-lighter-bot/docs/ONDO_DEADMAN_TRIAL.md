@@ -1,6 +1,6 @@
 # Ondo 데드맨 강제 종료 시험
 
-2026-10-29 KST. 실제 주문·데드맨 활성화는 승인 대기 중이다. 기본 명령은 조회만 한다.
+2026-10-29 KST. 첫 승인 시험에서 실제 타임아웃 취소와 미체결은 확인했지만 검사기의 실시간 판정은 실패했다. 파서를 실제 응답에 맞춰 수정했고 정상 감시 재시험은 새 주문 1건에 대한 별도 승인 대기 중이다. 기본 명령은 조회만 한다.
 
 ```
 python -m olbot.ondo_trial
@@ -21,9 +21,17 @@ python -m olbot.ondo_trial
 python -m olbot.ondo_trial --execute --approve-max-entry-usd 5 --approve-deadman --approve-cleanup
 ```
 
+현재의 종료된 실패 기록으로 재시험할 때에는 별도 승인 후 아래 명령을 쓴다.
+
+```
+python -m olbot.ondo_trial --execute --approve-max-entry-usd 5 --approve-deadman --approve-cleanup --retry-resolved
+```
+
+이 옵션은 이전 주문의 무체결 타임아웃 취소와 현재 위험 해소가 확인된 실패 기록에만 적용된다. 이전 JSON은 `data/trial-history/`에 보존하고 새 번호를 전송 전에 저장한다. 미확정·체결·이미 통과한 기록에는 사용할 수 없다. 실행 lock이 중복 실행을 막으며, 중단된 lock 파일도 확인 없이 삭제하면 안 된다.
+
 ## 판정과 기록
 
-- 데드맨 ACK 전에는 주문하지 않는다. 새 클라이언트는 기존 `OndoPrivateWS`와 `ReconnectingWS`를 상속하며 ACK 분류는 순수 함수로 분리했다. 실제 ACK 회귀 자료는 승인 시험 때 수집한다.
+- 데드맨 ACK 전에는 주문하지 않는다. 새 클라이언트는 기존 `OndoPrivateWS`와 `ReconnectingWS`를 상속하며 ACK 분류는 순수 함수다. 실제 수신 ACK와 최종 주문 응답을 회귀 자료로 수집했다. 마지막 하트비트 후 5~8초에 강제 종료하여 30초 관측 창에 여유를 둔다.
 - 주문 번호와 상태는 전송 전에 `data/ondo-deadman-trial.json`에 저장하고 fsync한다. 기존 기록이 있으면 새 주문을 거부한다. 기본 명령으로 재실행하면 같은 번호를 조회만 한다.
 - `canceled`와 `cancelReason=cancelAfterTimeout`, 체결 0, 실제 강제 종료, 30초 내 관측을 모두 만족해야 데드맨 통과다. 늦은 취소나 비상 수동 취소 성공을 데드맨 통과로 기록하지 않는다.
 - 전송 결과 유실·조회 실패·누락/잘못된 수량·알 수 없는 상태를 미체결로 간주하지 않는다. 자동 재주문은 없다.
