@@ -73,6 +73,9 @@ class Engine:
             from olbot.trial import require_resolved_trial
 
             require_resolved_trial(self.cfg)
+            from olbot.ondo_trial import require_resolved_trial as require_resolved_ondo_trial
+
+            require_resolved_ondo_trial(self.cfg)
         md = self.cfg.market_data
         resolved = await resolve(self.bases, md.ondo_rest_url, md.lighter_rest_url)
         if resolved.problems:

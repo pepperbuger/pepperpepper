@@ -79,6 +79,8 @@ cp .env.example .env
 
 ### 전체 봇 시험 (별도 승인 필요)
 
+Ondo 입금 후에도 바로 전체 봇을 켜지 않는다. 이번에 준비한 소액 자금은 [최소 수량 데드맨 시험](ONDO_DEADMAN_TRIAL.md)에만 사용한다. `python -m olbot.ondo_trial`로 계획을 조회하고, 실제 시험은 문서의 주문·계정 전체 취소 타이머·비상 정리 범위를 승인받은 뒤 수행한다. 전체 운영은 데드맨·실제 헷지 검증과 잔고에 맞는 주문 금액을 별도로 확인한 뒤 진행한다.
+
 1. dry_run 10분: `.venv/bin/python -m olbot run --duration 600`
    주문 없이 호가 계산만 한다. 1분마다 `DRY req/min=... | LIT[mid=... q=매수/매도 ...]` 줄이 나오면 정상.
 2. 실운영 10분: `.venv/bin/python -m olbot run --live --duration 600`
