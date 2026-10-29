@@ -197,3 +197,20 @@ async def test_engine_refuses_pending_trial_before_market_requests(tmp_path):
             await Engine(cfg, Secrets(), True, ledger).setup()
     finally:
         ledger.close()
+
+
+async def test_actual_canceled_ioc_response_confirms_zero_fill(monkeypatch):
+    from pathlib import Path
+    raw = json.loads((Path(__file__).parent / 'fixtures/lighter-canceled-ioc.json').read_text())
+    order = trial.parse_order_status(raw)
+    assert order.terminal and order.status == 'canceled-too-much-slippage'
+    assert order.initial == Decimal('3.54') and order.filled == Decimal('0.00')
+    async def get(path, token=None):
+        assert 'client_order_indexes=41' in path
+        return {'orders': [raw]}
+    async def account():
+        return {'positions': []}
+    trader = SimpleNamespace(account_index=7, _auth=lambda: 'test-token', account=account)
+    monkeypatch.setattr(trial, 'get', get)
+    result = await trial.final_order(trader, {'market_id':120, 'size':'3.54'}, 41, False)
+    assert result == order
