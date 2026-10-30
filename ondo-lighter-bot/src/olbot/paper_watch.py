@@ -367,6 +367,25 @@ def write_report(folder):
             if len(selected)!=2: continue
             fills=str(min(r['fills'] for r in selected))+'~'+str(max(r['fills'] for r in selected))
             compact.append(f"| {base} | {distance} | {fills} | {span(selected,'reward_scenario_week_usdc_mean','reward_scenario_week_usdc_high_mean')} | {span(selected,'hedge_cost_per_fill_usd')} | {span(selected,'net_observed_low_usdc','net_observed_high_usdc')} | {span(selected,'net_week_low_usdc','net_week_high_usdc')} |")
+    completed = data['state']=='finished' and data['updated_ts']>=data['deadline_ts']-.1
+    low_key,high_key = ('net_observed_low_usdc','net_observed_high_usdc') if completed else ('net_week_low_usdc','net_week_high_usdc')
+    compact += ['', '## 500 USD 자본의 주 2 USDC 순이익 기준', '',
+                '같은 거리·같은 모형의 BTC+ETH만 합산한다. 서로 다른 거리 대안의 수익을 더하지 않는다. 주 2 USDC는 단순 연 환산 약 20.8%이며 수익 보장이 아니다.', '',
+                '| 거리 bps | BTC+ETH 순이익 범위 USDC | 주 2 USDC 기준 |', '|---|---|---|']
+    for distance in (5,10,18):
+        totals=[]
+        for model in ('touch','through'):
+            selected=[r for r in data['rows'] if r['distance_bps']==distance and r['model']==model]
+            if len(selected)!=2 or any(r.get(low_key) is None or r.get(high_key) is None for r in selected):
+                totals=[];break
+            totals.append((sum(D(r[low_key]) for r in selected),sum(D(r[high_key]) for r in selected)))
+        if totals:
+            low,high=min(x[0] for x in totals),max(x[1] for x in totals)
+            verdict='가정 범위에서 기준 이상' if low>=2 else ('기준 미달' if high<2 else '모형 범위가 기준을 걸쳐 판단 유보')
+            compact.append(f'| {distance} | {low:.4f}~{high:.4f} | {verdict} |')
+        else:
+            compact.append(f'| {distance} | 산출 불가 | 자료 부족/정지 가정 확인 |')
+    compact += ['', '완료 시에는 7일 관측 순손익을 기준으로 비교하고, 그 전에는 주간 환산 가정만 표시한다. 실제 보상 지급·실주문 수익을 검증한 결과가 아니다.']
     lines = compact+['', '아래는 모형별 상세 표다.', '']+lines
     lines += ['', '순손익 = 평가 매매손익 + 가정 리워드 + 예상 펀딩 - 종료 정리 비용. 매매손익에는 maker 수수료가 이미 포함돼 중복 차감하지 않는다.',
               '거래소 간 가격 차이, 누적 대기, 300ms 후 가격 변화, Lighter 호가 스프레드·깊이, 수수료는 summary.json에 분리한다.',

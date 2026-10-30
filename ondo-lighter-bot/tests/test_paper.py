@@ -161,3 +161,21 @@ def test_report_has_six_conditions_and_keeps_missing_cost_as_unknown(tmp_path):
     assert '산출 불가' in compact
     data=json.loads((tmp_path/'report-data.json').read_text(encoding='utf-8'))
     assert all(r['hedge_cost_per_fill_usd'] is None and r['net_week_low_usdc'] is None for r in data['rows'])
+
+
+@pytest.mark.parametrize('low,high,verdict',[('.6','.8','기준 미달'),('1.1','1.2','가정 범위에서 기준 이상'),('.8','1.3','판단 유보')])
+def test_two_dollar_threshold_uses_combined_net_not_gross_rewards(tmp_path,low,high,verdict):
+    w=Watch(tmp_path,'unused',100)
+    for base in ('BTC','ETH'):
+        for distance in (5,10,18):
+            for model in ('touch','through'):
+                w.scenarios.append(Scenario(base,distance,model,D('.01'),D('.01'),D(10),D('.01')))
+    summary=w.summary(5)
+    for row in summary['rows']:
+        row['net_week_low_usdc']=low;row['net_week_high_usdc']=high
+        row['reward_scenario_week_usdc_mean']='100'
+        row['reward_scenario_week_usdc_high_mean']='100'
+    w.write('summary.json',summary)
+    write_report(tmp_path)
+    report=(tmp_path/'REPORT.md').read_text(encoding='utf-8')
+    assert verdict in report
