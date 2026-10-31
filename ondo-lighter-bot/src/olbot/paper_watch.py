@@ -81,7 +81,7 @@ class LighterPaperWS(ReconnectingWS):
 class Watch:
     bases = ('BTC', 'ETH')
 
-    def __init__(self, output, policy, deadline, no_rest=False):
+    def __init__(self, output, policy, deadline, no_rest=False, resume_flat=False):
         self.output, self.policy_path, self.deadline = Path(output), policy, deadline
         self.output.mkdir(parents=True, exist_ok=True)
         self.board = MarketBoard(list(self.bases))
@@ -97,6 +97,34 @@ class Watch:
         self.fixture_keys = set()
         self.reward_ts = None
         self.started = time.time()
+        self.resume_state = None
+        self.interruption_gaps = []
+        if resume_flat:
+            prior = json.loads((self.output/'summary.json').read_text(encoding='utf-8'))
+            expected = {(b,d,m) for b in self.bases for d in (5,10,18) for m in ('touch','through')}
+            rows = prior['rows']
+            actual = {(r['base'],r['distance_bps'],r['model']) for r in rows}
+            if actual != expected or len(rows) != len(expected):
+                raise ValueError('공개 비교 복구: 모형 목록 불일치')
+            # The summary alone cannot prove that a fill after its last write did not occur.
+            for name in ('fills.jsonl','hedges.jsonl'):
+                path = self.output/name
+                if path.exists() and path.read_text(encoding='utf-8').strip():
+                    raise ValueError('공개 비교 복구: 가상 체결 이력이 있어 자동 복원 금지')
+            for r in rows:
+                if (r['fills'] or r['hedges'] or r['pending_hedge']
+                        or D(r['position']) != 0 or D(r['lighter_position']) != 0
+                        or D(r['maker_fees_usd']) != 0 or D(r['fill_notional_usd']) != 0):
+                    raise ValueError('공개 비교 복구: 가상 포지션/체결이 0이 아님')
+            if (prior['state'] != 'observing' or not prior['started_ts'] < prior['updated_ts'] < self.started < prior['deadline_ts']):
+                raise ValueError('공개 비교 복구: 상태 또는 원래 마감 오류')
+            self.deadline = prior['deadline_ts']
+            self.interruption_gaps = prior.get('interruption_gaps', []) + [
+                {'start_ts':prior['updated_ts'],'end_ts':self.started,'reason':'worker absent; explicitly authorized restart; no reconstructed trades'}]
+            self.resume_state = prior
+            self.started = prior['started_ts']
+            self.message_counts = dict(prior['messages'])
+            self.event_counts = dict(prior['events'])
         self.stop = asyncio.Event()
         self.no_rest = no_rest
         self.ondo_ws, self.lighter_ws = OndoPaperWS(self), LighterPaperWS(self)
@@ -138,7 +166,9 @@ class Watch:
         if key not in self.fixture_keys:
             self.fixture_keys.add(key)
             folder = self.output / 'fixtures'; folder.mkdir(exist_ok=True)
-            (folder / (key+'.json')).write_text(json.dumps(msg, ensure_ascii=False), encoding='utf-8')
+            path = folder / (key+'.json')
+            if not path.exists():
+                path.write_text(json.dumps(msg, ensure_ascii=False), encoding='utf-8')
 
     def healthy(self, base, now):
         oq, book = self.board.states[base].ondo, self.books[base]
@@ -176,11 +206,37 @@ class Watch:
                                         D(detail['min_quote_amount']), D(detail['min_base_amount']))
                     scenario.last_quote = self.started - (10 if b == 'BTC' else 5)
                     self.scenarios.append(scenario)
-        self.write('method.json', {'version': 1, 'started_ts': self.started, 'deadline_ts': self.deadline,
+        if self.resume_state is not None:
+            self.restore_flat_observations()
+        if not (self.output/'method.json').exists():
+            self.write('method.json', {'version': 1, 'started_ts': self.started, 'deadline_ts': self.deadline,
                                   'size_per_side_usd': '60', 'offsets_bps': [5,10,18], 'refresh_sec': 10,
                                   'replace_gap_sec': 2, 'hedge_delay_sec': '.300', 'maker_fee': '.0001',
                                   'lighter_taker_fee': '0', 'orders_sent': 0,
                                   'note': 'touch/through 시나리오이며 실제 체결 확률의 통계적 신뢰구간이 아니다.'})
+
+    def restore_flat_observations(self):
+        prior = self.resume_state
+        indexed = {(s.base,s.distance,s.model):s for s in self.scenarios}
+        now = time.time()
+        for r in prior['rows']:
+            s = indexed[(r['base'],r['distance_bps'],r['model'])]
+            s.eligible_seconds = r['qualified_data_seconds']
+            s.data_gap_seconds = r['data_gap_seconds'] + now-prior['updated_ts']
+            s.last_tick = now
+            s.reward_unknown = r['reward_unknown_samples'] + 1  # Unobserved interval is not zero profit.
+            s.killed = r['killed']  # A restart never clears a model's risk stop.
+            s.failed_hedges = r['failed_hedges']
+        path = self.output/'rewards.jsonl'
+        if path.exists():
+            for line in path.read_text(encoding='utf-8').splitlines():
+                r = json.loads(line);s = indexed[(r['base'],r['distance'],r['model'])]
+                low,high,span = D(r['low_week_usdc']),D(r['high_week_usdc']),D(str(r['interpolation_sec']))
+                s.reward_values.append(low);s.reward_high_values.append(high)
+                s.reward_accrued_low += low*span/604800
+                s.reward_accrued_high += high*span/604800
+        # No old virtual quotes, stale prices, funding forecasts, or reconnect state are restored.
+        self.event('paper_resume','authorized',json.dumps(self.interruption_gaps[-1]))
 
     async def rewards(self):
         await asyncio.sleep(random.uniform(5, 15))
@@ -260,6 +316,7 @@ class Watch:
                 'state': 'finished' if final else 'observing', 'orders_sent': 0,
                 'connected': {'ondo': self.ondo_ws.connected, 'lighter': self.lighter_ws.connected},
                 'messages': self.message_counts, 'events': self.event_counts, 'rows': rows,
+                'interruption_gaps': self.interruption_gaps,
                 'warning': '가상 체결/지연 시나리오. 실제 수익 아님. 순이익 null은 불확실·자료 부족이며 0이 아님.'}
 
     async def run(self):
@@ -302,7 +359,7 @@ class Watch:
             write_report(self.output)
 
 
-def write_report(folder):
+def write_report(folder,funding_folder=None):
     folder = Path(folder)
     data = json.loads((folder/'summary.json').read_text(encoding='utf-8'))
     # 유효 공지를 뒤늦게 확인한 주간은 보존한 원본 깊이와 당시 가상 호가로 재계산한다.
@@ -333,6 +390,8 @@ def write_report(folder):
             row['reward_scenario_week_usdc_mean'] = str(a['low']/a['n'])
             row['reward_scenario_week_usdc_high_mean'] = str(a['high']/a['n'])
             row['reward_unknown_samples'] = a['unknown']
+            row['reward_accrued_low_usdc'] = str(a['accrued_low']) if not a['unknown'] else None
+            row['reward_accrued_high_usdc'] = str(a['accrued_high']) if not a['unknown'] else None
             if not a['unknown'] and row['exit_cost_estimate_usd'] is not None and row['mark_pnl_ex_reward_funding_usd'] is not None and row['funding_unknown_seconds'] < 1 and not row['pending_hedge']:
                 pnl = D(row['mark_pnl_ex_reward_funding_usd'])+D(row['funding_estimate_usd'])
                 exit_cost = D(row['exit_cost_estimate_usd'])
@@ -341,6 +400,37 @@ def write_report(folder):
                 if not row['killed']:
                     row['net_week_low_usdc'] = str(pnl*604800/elapsed+a['low']/a['n']-exit_cost)
                     row['net_week_high_usdc'] = str(pnl*604800/elapsed+a['high']/a['n']-exit_cost)
+    funding_folder=Path(funding_folder) if funding_folder is not None else folder.parent/'funding'
+    if (funding_folder/'hourly-latest.json').exists():
+        from olbot.funding_report import scenario_funding,price_proxies
+        hourly=json.loads((funding_folder/'hourly-latest.json').read_text(encoding='utf-8'))
+        proxies=price_proxies(folder)
+        for row in data['rows']:
+            f=scenario_funding(folder,hourly['rows'],row['base'],row['distance_bps'],row['model'],data['updated_ts'],prices=proxies)
+            row['funding_forecast_original_usd']=row['funding_estimate_usd']
+            row['funding_settled_rate_credit']=f
+            row['funding_settled_credit_usdc']=f['credit_usdc']
+            row['net_observed_low_usdc']=row['net_observed_high_usdc']=None
+            row['net_week_low_usdc']=row['net_week_high_usdc']=None
+            credit=f['credit_usdc']
+            if (credit is not None and row.get('reward_accrued_low_usdc') is not None
+                    and row.get('reward_accrued_high_usdc') is not None and row.get('exit_cost_estimate_usd') is not None
+                    and row.get('mark_pnl_ex_reward_funding_usd') is not None and not row['pending_hedge']):
+                pnl=D(row['mark_pnl_ex_reward_funding_usd'])+D(credit)
+                exit_cost=D(row['exit_cost_estimate_usd'])
+                row['net_observed_low_usdc']=str(pnl+D(row['reward_accrued_low_usdc'])-exit_cost)
+                row['net_observed_high_usdc']=str(pnl+D(row['reward_accrued_high_usdc'])-exit_cost)
+                elapsed=D(str(data['updated_ts']-data['started_ts']))
+                if elapsed>0 and not row['killed']:
+                    row['net_week_low_usdc']=str(pnl*604800/elapsed+D(row['reward_scenario_week_usdc_mean'])-exit_cost)
+                    row['net_week_high_usdc']=str(pnl*604800/elapsed+D(row['reward_scenario_week_usdc_high_mean'])-exit_cost)
+        data['funding_basis']='historically settled rates, virtual settlement-time inventories, Ondo mid proxy; replaces forecast'
+    if data.get('interruption_gaps'):
+        # A favorable observed subset is not a full-week result across a missing market interval.
+        for row in data['rows']:
+            row['net_observed_low_usdc']=row['net_observed_high_usdc']=None
+            row['net_week_low_usdc']=row['net_week_high_usdc']=None
+        data['coverage_warning']='수집 중단 구간이 있어 전체 기간 순이익은 산출 불가; 관측 표본의 리워드 가정과 실제 수익을 구분한다.'
     (folder/'report-data.json').write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
     lines = ['# BTC·ETH 거리별 가상 비교', '',
              '주문 0. 아래는 공개 체결 touch/through 대안 모형이며 실제 체결 확률·실제 수익이 아니다.', '',
@@ -359,14 +449,16 @@ def write_report(folder):
         a,b=min(D(v) for v in values),max(D(v) for v in values)
         return f'{a:.4f}' if a==b else f'{a:.4f}~{b:.4f}'
     compact = ['# 6개 조건 순이익 비교', '', 'touch/through 대안 모형 사이의 범위이며 실제 결과 보장이나 통계적 신뢰구간이 아니다.', '',
-               '| 마켓 | 거리 bps | 가상 체결 건수 | 주간 리워드 가정 USDC | 체결당 헷지 비용 USD | 관측 순손익 USDC | 7일 환산 순손익 USDC |',
-               '|---|---:|---|---|---|---|---|']
+               '| 마켓 | 거리 bps | 가상 체결 건수 | 주간 리워드 가정 USDC | 체결당 헷지 비용 USD | 확정률 기반 펀딩 USDC | 관측 순손익 USDC | 7일 환산 순손익 USDC |',
+               '|---|---:|---|---|---|---|---|---|']
+    if data.get('coverage_warning'):
+        compact[2] += ' '+data['coverage_warning']
     for base in ('BTC','ETH'):
         for distance in (5,10,18):
             selected=[r for r in data['rows'] if r['base']==base and r['distance_bps']==distance]
             if len(selected)!=2: continue
             fills=str(min(r['fills'] for r in selected))+'~'+str(max(r['fills'] for r in selected))
-            compact.append(f"| {base} | {distance} | {fills} | {span(selected,'reward_scenario_week_usdc_mean','reward_scenario_week_usdc_high_mean')} | {span(selected,'hedge_cost_per_fill_usd')} | {span(selected,'net_observed_low_usdc','net_observed_high_usdc')} | {span(selected,'net_week_low_usdc','net_week_high_usdc')} |")
+            compact.append(f"| {base} | {distance} | {fills} | {span(selected,'reward_scenario_week_usdc_mean','reward_scenario_week_usdc_high_mean')} | {span(selected,'hedge_cost_per_fill_usd')} | {span(selected,'funding_settled_credit_usdc')} | {span(selected,'net_observed_low_usdc','net_observed_high_usdc')} | {span(selected,'net_week_low_usdc','net_week_high_usdc')} |")
     completed = data['state']=='finished' and data['updated_ts']>=data['deadline_ts']-.1
     low_key,high_key = ('net_observed_low_usdc','net_observed_high_usdc') if completed else ('net_week_low_usdc','net_week_high_usdc')
     compact += ['', '## 500 USD 자본의 주 2 USDC 순이익 기준', '',
@@ -393,6 +485,9 @@ def write_report(folder):
               '순손익 산출 불가는 0 수익이 아니다. 정책 만료·잘린 호가·펀딩 공백·미확정 모형 헷지·정지 상태를 함께 확인한다.',
               '주간 환산은 관측기간과 같은 조건이 유지된다는 가정이다. 모형이 정지되면 계속 거래하는 환산을 하지 않는다. 실제 지급액은 별도 확인해야 한다.']
     (folder/'REPORT.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    if (funding_folder/'hourly-latest.json').exists():
+        from olbot.funding_report import write_funding_report
+        write_funding_report(folder,funding_folder,paper_data=data)
 
 
 def main(argv=None):
@@ -401,9 +496,12 @@ def main(argv=None):
     p.add_argument('--policy', default='docs/rewards-2026-10-27.json')
     p.add_argument('--duration', type=float, default=604800)
     p.add_argument('--no-rest', action='store_true', help='공개 WS 경로만 짧게 검증; 리워드 REST 관측 안 함')
+    p.add_argument('--resume-flat', action='store_true', help='별도 승인 후 가상 체결/포지션0인 기존 관측만 복구; 마감 유지')
     args = p.parse_args(argv)
     if not 0 < args.duration <= 604800: p.error('기간은 0 초과 604800 이하')
-    asyncio.run(Watch(args.output, args.policy, time.time()+args.duration, args.no_rest).run())
+    if not args.resume_flat and (Path(args.output)/'summary.json').exists():
+        p.error('기존 관측은 덮어쓰지 않는다. 승인된 복구에는 --resume-flat 필요')
+    asyncio.run(Watch(args.output, args.policy, time.time()+args.duration, args.no_rest,args.resume_flat).run())
     return 0
 
 
