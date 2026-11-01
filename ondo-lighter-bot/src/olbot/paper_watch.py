@@ -20,6 +20,7 @@ from olbot.paper import (Book, Scenario, common_step, parse_book, parse_trades,
 from olbot.ratelimit import TokenBucket
 from olbot.rewards import load_policy
 from olbot.wsbase import ReconnectingWS
+from olbot.public_budget import public_get
 
 ONDO = 'https://api.ondoperps.xyz'
 LIGHTER = 'https://mainnet.zklighter.elliot.ai'
@@ -81,9 +82,10 @@ class LighterPaperWS(ReconnectingWS):
 class Watch:
     bases = ('BTC', 'ETH')
 
-    def __init__(self, output, policy, deadline, no_rest=False, resume_flat=False):
+    def __init__(self, output, policy, deadline, no_rest=False, resume_flat=False,resume_hedged=False,rest_coordination=None):
         self.output, self.policy_path, self.deadline = Path(output), policy, deadline
         self.output.mkdir(parents=True, exist_ok=True)
+        self.rest_coordination=Path(rest_coordination) if rest_coordination else self.output
         self.board = MarketBoard(list(self.bases))
         self.books = {b: Book() for b in self.bases}
         self.bucket = TokenBucket(1, 1)
@@ -99,7 +101,9 @@ class Watch:
         self.started = time.time()
         self.resume_state = None
         self.interruption_gaps = []
-        if resume_flat:
+        self.recovered_virtual_state=None
+        if resume_flat and resume_hedged:raise ValueError('choose one recovery mode')
+        if resume_flat or resume_hedged:
             prior = json.loads((self.output/'summary.json').read_text(encoding='utf-8'))
             expected = {(b,d,m) for b in self.bases for d in (5,10,18) for m in ('touch','through')}
             rows = prior['rows']
@@ -107,11 +111,11 @@ class Watch:
             if actual != expected or len(rows) != len(expected):
                 raise ValueError('공개 비교 복구: 모형 목록 불일치')
             # The summary alone cannot prove that a fill after its last write did not occur.
-            for name in ('fills.jsonl','hedges.jsonl'):
+            for name in (('fills.jsonl','hedges.jsonl') if resume_flat else ()):
                 path = self.output/name
                 if path.exists() and path.read_text(encoding='utf-8').strip():
                     raise ValueError('공개 비교 복구: 가상 체결 이력이 있어 자동 복원 금지')
-            for r in rows:
+            for r in (rows if resume_flat else []):
                 if (r['fills'] or r['hedges'] or r['pending_hedge']
                         or D(r['position']) != 0 or D(r['lighter_position']) != 0
                         or D(r['maker_fees_usd']) != 0 or D(r['fill_notional_usd']) != 0):
@@ -125,6 +129,9 @@ class Watch:
             self.started = prior['started_ts']
             self.message_counts = dict(prior['messages'])
             self.event_counts = dict(prior['events'])
+            if resume_hedged:
+                from olbot.paper_recovery import reconciled_state
+                self.recovered_virtual_state=reconciled_state(self.output,prior)
         self.stop = asyncio.Event()
         self.no_rest = no_rest
         self.ondo_ws, self.lighter_ws = OndoPaperWS(self), LighterPaperWS(self)
@@ -132,21 +139,14 @@ class Watch:
     async def get(self, url):
         if not url.startswith(ONDO):
             return await asyncio.to_thread(_get_json, url)
-        while True:
-            while (self.output/'PAUSE_REST').exists(): await asyncio.sleep(.1)
-            await self.bucket.acquire()
-            if not (self.output/'PAUSE_REST').exists(): break
-        active = self.output/'REST_ACTIVE'
-        active.write_text(str(time.time()),encoding='utf-8')
-        try:
-            return await asyncio.to_thread(_get_json, url)
-        finally:
-            active.unlink(missing_ok=True)
+        return await public_get(url,self.rest_coordination,getter=_get_json)
 
     def write(self, file, value, append=False):
         text = json.dumps(value, default=str, ensure_ascii=False)
-        with (self.output / file).open('a' if append else 'w', encoding='utf-8') as stream:
-            stream.write(text + '\n')
+        if append:
+            with (self.output/file).open('a',encoding='utf-8') as stream:stream.write(text+'\n')
+        else:
+            temp=self.output/(file+'.tmp');temp.write_text(text+'\n',encoding='utf-8');temp.replace(self.output/file)
 
     def event(self, source, kind, detail=''):
         self.event_counts[source + ':' + kind] = self.event_counts.get(source + ':' + kind, 0) + 1
@@ -227,6 +227,9 @@ class Watch:
             s.reward_unknown = r['reward_unknown_samples'] + 1  # Unobserved interval is not zero profit.
             s.killed = r['killed']  # A restart never clears a model's risk stop.
             s.failed_hedges = r['failed_hedges']
+            if self.recovered_virtual_state is not None:
+                for field,value in self.recovered_virtual_state[(s.base,s.distance,s.model)].items():setattr(s,field,value)
+                if s.pos or s.lpos:s.funding_unknown_seconds+=now-prior['updated_ts']
         path = self.output/'rewards.jsonl'
         if path.exists():
             for line in path.read_text(encoding='utf-8').splitlines():
@@ -237,6 +240,9 @@ class Watch:
                 s.reward_accrued_high += high*span/604800
         # No old virtual quotes, stale prices, funding forecasts, or reconnect state are restored.
         self.event('paper_resume','authorized',json.dumps(self.interruption_gaps[-1]))
+
+    def group(self,scenario):
+        return [x for x in self.scenarios if x.distance==scenario.distance and x.model==scenario.model]
 
     async def rewards(self):
         await asyncio.sleep(random.uniform(5, 15))
@@ -330,7 +336,7 @@ class Watch:
                 for s in self.scenarios:
                     oq, book = self.board.states[s.base].ondo, self.books[s.base]
                     healthy = self.healthy(s.base, now)
-                    group = [x for x in self.scenarios if x.distance == s.distance and x.model == s.model]
+                    group = self.group(s)
                     inventory = sum((abs(x.pos*(self.board.states[x.base].ondo.mid if self.board.states[x.base].ondo else 0)) for x in group), D(0))
                     if oq:
                         s.quote(oq.mid, oq.bid, oq.ask, now, healthy, inventory+D(60) <= 350)
@@ -362,6 +368,7 @@ class Watch:
 def write_report(folder,funding_folder=None):
     folder = Path(folder)
     data = json.loads((folder/'summary.json').read_text(encoding='utf-8'))
+    bases=tuple(data.get('bases',('BTC','ETH')))
     # 유효 공지를 뒤늦게 확인한 주간은 보존한 원본 깊이와 당시 가상 호가로 재계산한다.
     policies = [load_policy(path) for path in (folder/'policies').glob('*.json')] if (folder/'policies').exists() else []
     rewards = {}
@@ -374,7 +381,7 @@ def write_report(folder,funding_folder=None):
                     key = (sample['base'],order['distance'],order['model'])
                     agg = rewards.setdefault(key, {'low':D(0),'high':D(0),'accrued_low':D(0),'accrued_high':D(0),'n':0,'unknown':0,'ts':sample['ts']})
                     dt = sample['ts']-agg['ts']; agg['ts'] = sample['ts']
-                    estimate = None if policy is None else ((D(0),D(0),False) if sample['base'] not in policy.allowed_bases else
+                    estimate = None if policy is None or sample['book'] is None else ((D(0),D(0),False) if sample['base'] not in policy.allowed_bases else
                         reward_scenario(sample['book'],[(D(p),D(q)) for p,q in order['levels']],policy.per_market_usdc))
                     if estimate is None or dt > 90:
                         agg['unknown'] += 1
@@ -432,7 +439,7 @@ def write_report(folder,funding_folder=None):
             row['net_week_low_usdc']=row['net_week_high_usdc']=None
         data['coverage_warning']='수집 중단 구간이 있어 전체 기간 순이익은 산출 불가; 관측 표본의 리워드 가정과 실제 수익을 구분한다.'
     (folder/'report-data.json').write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
-    lines = ['# BTC·ETH 거리별 가상 비교', '',
+    lines = ['# '+ '·'.join(bases)+' 거리별 가상 비교', '',
              '주문 0. 아래는 공개 체결 touch/through 대안 모형이며 실제 체결 확률·실제 수익이 아니다.', '',
              '| 마켓 | 거리 | 모형 | 가상 체결 | 주간 리워드 가정 범위 | 체결당 헷지 비용 USD | 관측 순손익 범위 USD | 7일 환산 순손익 범위 USD | 상태 |',
              '|---|---:|---|---:|---|---:|---|---|---|']
@@ -448,12 +455,12 @@ def write_report(folder,funding_folder=None):
         if any(v is None for v in values): return '산출 불가'
         a,b=min(D(v) for v in values),max(D(v) for v in values)
         return f'{a:.4f}' if a==b else f'{a:.4f}~{b:.4f}'
-    compact = ['# 6개 조건 순이익 비교', '', 'touch/through 대안 모형 사이의 범위이며 실제 결과 보장이나 통계적 신뢰구간이 아니다.', '',
+    compact = [f'# {len(bases)*3}개 조건 순이익 비교', '', 'touch/through 대안 모형 사이의 범위이며 실제 결과 보장이나 통계적 신뢰구간이 아니다.', '',
                '| 마켓 | 거리 bps | 가상 체결 건수 | 주간 리워드 가정 USDC | 체결당 헷지 비용 USD | 확정률 기반 펀딩 USDC | 관측 순손익 USDC | 7일 환산 순손익 USDC |',
                '|---|---:|---|---|---|---|---|---|']
     if data.get('coverage_warning'):
         compact[2] += ' '+data['coverage_warning']
-    for base in ('BTC','ETH'):
+    for base in bases:
         for distance in (5,10,18):
             selected=[r for r in data['rows'] if r['base']==base and r['distance_bps']==distance]
             if len(selected)!=2: continue
@@ -461,10 +468,26 @@ def write_report(folder,funding_folder=None):
             compact.append(f"| {base} | {distance} | {fills} | {span(selected,'reward_scenario_week_usdc_mean','reward_scenario_week_usdc_high_mean')} | {span(selected,'hedge_cost_per_fill_usd')} | {span(selected,'funding_settled_credit_usdc')} | {span(selected,'net_observed_low_usdc','net_observed_high_usdc')} | {span(selected,'net_week_low_usdc','net_week_high_usdc')} |")
     completed = data['state']=='finished' and data['updated_ts']>=data['deadline_ts']-.1
     low_key,high_key = ('net_observed_low_usdc','net_observed_high_usdc') if completed else ('net_week_low_usdc','net_week_high_usdc')
-    compact += ['', '## 500 USD 자본의 주 2 USDC 순이익 기준', '',
+    if data.get('independent_candidates'):
+        compact += ['', '## 후보별 독립 자본 500 USD', '',
+                    '각 마켓·거리·모형은 별도 대안이다. 모든 마켓의 수익이나 자본을 합산하지 않는다. 원래 BTC/ETH 구간과 새 후보의 관측 기간도 다르다.', '',
+                    '현재 관측 결과는 부분 기간이며, 7일 실제 수익 검증이 아니다. 주 2 USDC 판단에는 관측 기간·누락·비용을 함께 확인한다.', '',
+                    '| 후보 | 거리 bps | 주간 환산 순이익 가정 USDC | 주 2 USDC 기준 |', '|---|---:|---|---|']
+        for base in bases:
+            for distance in (5,10,18):
+                selected=[r for r in data['rows'] if r['base']==base and r['distance_bps']==distance]
+                known=len(selected)==2 and all(r.get('net_week_low_usdc') is not None and r.get('net_week_high_usdc') is not None for r in selected)
+                verdict='자료 부족'
+                if known:
+                    low=min(D(r['net_week_low_usdc']) for r in selected);high=max(D(r['net_week_high_usdc']) for r in selected)
+                    verdict='가정 범위에서 기준 이상' if low>=2 else ('가정 범위에서 기준 미달' if high<2 else '가정 범위가 기준을 걸침')
+                if data['updated_ts']-data['started_ts']<604800:verdict+='; 관측 7일 미만'
+                compact.append(f"| {base} | {distance} | {span(selected,'net_week_low_usdc','net_week_high_usdc')} | {verdict} |")
+    else:
+        compact += ['', '## 500 USD 자본의 주 2 USDC 순이익 기준', '',
                 '같은 거리·같은 모형의 BTC+ETH만 합산한다. 서로 다른 거리 대안의 수익을 더하지 않는다. 주 2 USDC는 단순 연 환산 약 20.8%이며 수익 보장이 아니다.', '',
                 '| 거리 bps | BTC+ETH 순이익 범위 USDC | 주 2 USDC 기준 |', '|---|---|---|']
-    for distance in (5,10,18):
+    for distance in (() if data.get('independent_candidates') else (5,10,18)):
         totals=[]
         for model in ('touch','through'):
             selected=[r for r in data['rows'] if r['distance_bps']==distance and r['model']==model]
@@ -497,11 +520,13 @@ def main(argv=None):
     p.add_argument('--duration', type=float, default=604800)
     p.add_argument('--no-rest', action='store_true', help='공개 WS 경로만 짧게 검증; 리워드 REST 관측 안 함')
     p.add_argument('--resume-flat', action='store_true', help='별도 승인 후 가상 체결/포지션0인 기존 관측만 복구; 마감 유지')
+    p.add_argument('--resume-hedged',action='store_true',help='승인 후 요약·전체 체결/헷지 기록이 정확히 일치하는 가상 재고만 복원')
+    p.add_argument('--rest-coordination',help='동시 공개 수집기와 공유하는 Ondo 요청 예산 폴더')
     args = p.parse_args(argv)
     if not 0 < args.duration <= 604800: p.error('기간은 0 초과 604800 이하')
-    if not args.resume_flat and (Path(args.output)/'summary.json').exists():
+    if not args.resume_flat and not args.resume_hedged and (Path(args.output)/'summary.json').exists():
         p.error('기존 관측은 덮어쓰지 않는다. 승인된 복구에는 --resume-flat 필요')
-    asyncio.run(Watch(args.output, args.policy, time.time()+args.duration, args.no_rest,args.resume_flat).run())
+    asyncio.run(Watch(args.output,args.policy,time.time()+args.duration,args.no_rest,args.resume_flat,args.resume_hedged,args.rest_coordination).run())
     return 0
 
 

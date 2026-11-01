@@ -92,7 +92,7 @@ ondo-lighter-bot/
   docs/LIVE_10MIN_RESULT.md 메인 봇 10분 실측과 남은 검증 항목
   scripts/
     ondo_depth_probe.py   마켓 선별용 읽기 전용 측정기 (완성)
-  docs/RESEARCH_CANDIDATES.md  BTC·ETH·META 기본 검토 후보, 주식 시간대·동일 자본 비교 기준
+  docs/RESEARCH_CANDIDATES.md  BTC·ETH 및 TradFi6개 공개 비교, 시간대·독립 자본 기준
   src/olbot/
     main.py               실행 진입점: check-config, watch 명령 (완성)
     config.py             설정과 비밀값 로딩, 검증 (완성)
@@ -120,6 +120,9 @@ ondo-lighter-bot/
     reward_probe.py       키 없는 공개 GET 관측, Decimal 호가 두께·가정 시나리오 (주문 없음)
     paper.py              순수 공개 파서·호가 복원·가상 부분 체결·300ms 비용/위험 모형
     paper_watch.py        공개 WS 수집·주간 보상 원본 보존·6조건/12모형 보고서 (키/실주문 없음)
+    paper_recovery.py     가상 체결/헷지 저널과 체크포인트 대사, 현금흐름·헷지된 재고 복구
+    candidate_watch.py    META/TSLA/NVDA/XAG/XAU/WTI 별도 공개 WS 관측·미국장 시간대
+    public_budget.py      프로세스 간 공개 GET 잠금·1.1초 간격·공개 URL 제한·요청 감사 기록
     close_positions.py    승인된 잔여 LIT/ENA 단발 정리, 기본 조회·reduce-only IOC4건·전송 전 저널·불명 재전송 금지
     public_lease.py       별도 공개 수집기 간 REST 직렬화, 다른 소유자의 pause 보존
     funding.py            공개 확정 펀딩 파서·시간 정렬·부호/누락/고정 방향 통계
@@ -247,7 +250,7 @@ SQLite 테이블(`data/olbot.sqlite`):
 
 ## 8. 구현 순서 (Claude Code에 단계별로 요청)
 
-2026-11-01 후보 등록 완료: 사용자가 META를 기본 검토 후보에 추가해 BTC·ETH·META로 정리했다. `docs/RESEARCH_CANDIDATES.md`의 자본500 USD·장중/야간/주말·후속 새 시작 시각 기준을 따른다. 기존 BTC/ETH 모형·정책과 실제 설정을 바꾸거나 수집기를 재시작하지 않았다. 중단 기록·가상 체결 이력은 보존한다. META live나3개 마켓 동시 운영 승인은 아니다.
+2026-11-01 공개 비교 확대 구현 완료: 사용자 지시로 BTC/ETH 공개 관측 복구와META·TSLA·NVDA·XAG·XAU·WTI 별도 비교를 준비했다. 기존 포지션0 전용 복구는 유지하며, 새 `--resume-hedged`는 저널·저장 수량·전량 비용 계산이 일치할 때만 가상 재고·현금흐름·위험 상태를 보존한다. 새 후보는18조건/36모형의 독립500USD 대안이며 기존12모형에 소급 합산하지 않는다. 미국 DST/휴일 분류·실제 깊이 파서·서로 다른 프로세스의1.1초 요청 간격 포함333개 테스트 통과. 실제 공개 실행 확인은 launch/신규표본으로 기록한다. 실주문·계정·기존 설정·운영data는 변경하지 않는다.
 
 2026-10-31 공개 복구 경로 완료: 사용자 재개 승인 후 가상 체결/헷지 이벤트 없음·모든 가상 포지션0일 때만 원래 기간을 이어받는다. 보상 표본·초기 fixture·펀딩 first_seen·정지 상태를 보존하고 누락을 표시한다. 전체 기간 순이익은 누락 시 산출 불가다. 펀딩 확정 이력·복구 회귀 포함318개 통과. 새 실주문 없음.
 

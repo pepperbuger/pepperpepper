@@ -9,12 +9,14 @@ import json
 from pathlib import Path
 import time
 import urllib.parse
+from contextlib import asynccontextmanager
 
 from olbot.funding import parse_ondo_history,parse_lighter_history,make_hours,finite,history_window
 from olbot.markets import _get_json
 from olbot.paper import Book,parse_book,common_step,vwap
 from olbot.public_lease import public_rest_lease
 from olbot.ratelimit import TokenBucket
+from olbot.public_budget import public_get
 
 ONDO='https://api.ondoperps.xyz'
 LIGHTER='https://mainnet.zklighter.elliot.ai'
@@ -47,9 +49,14 @@ class FundingWatch:
         self.comparison,self.output=Path(comparison),Path(output)
         self.output.mkdir(parents=True,exist_ok=True)
         self.bucket=TokenBucket(1,1)
-        self.started=time.time();self.history={b:{'ondo':{},'lighter':{}} for b in self.bases}
+        self.started=time.time()
         self.meta={};self.seed_costs={};self.calls=0;self.errors=0
         launch=json.loads((self.comparison.parent/'comparison-launch.json').read_text(encoding='utf-8-sig'))
+        self.bases=tuple(launch.get('markets',('BTC','ETH')))
+        if not self.bases or len(set(self.bases))!=len(self.bases) or any(b not in {'BTC','ETH','META','TSLA','NVDA','XAU','XAG','WTI'} for b in self.bases):raise ValueError('unsupported research base list')
+        self.history={b:{'ondo':{},'lighter':{}} for b in self.bases}
+        self.coordination=Path(launch.get('rest_coordination',self.comparison))
+        self.lease_token=None
         self.start=datetime.fromisoformat(launch['started_utc']).timestamp()
         self.end=datetime.fromisoformat(launch['deadline_utc']).timestamp()
         saved=self.output/'hourly-latest.json'
@@ -70,12 +77,19 @@ class FundingWatch:
             temp=self.output/(name+'.tmp');temp.write_text(json.dumps(data,default=str,ensure_ascii=False),encoding='utf-8');temp.replace(self.output/name)
 
     async def get(self,url):
-        if url.startswith(ONDO): await self.bucket.acquire()
         self.calls+=1
+        if url.startswith(ONDO):return await public_get(url,self.coordination,owner=self.lease_token,getter=_get_json)
         return await asyncio.to_thread(_get_json,url)
 
+    @asynccontextmanager
+    async def lease(self):
+        async with public_rest_lease(self.coordination) as token:
+            self.lease_token=token
+            try:yield
+            finally:self.lease_token=None
+
     async def setup(self):
-        async with public_rest_lease(self.comparison):
+        async with self.lease():
             op=(await self.get(ONDO+'/v1/markets'))['result']['perps']['tradingPairs']
             om={x['pair']['base'].upper():x for x in op if not x.get('disabled')}
             lm=(await self.get(LIGHTER+'/api/v1/orderBooks'))['order_books']
@@ -95,8 +109,9 @@ class FundingWatch:
         with gzip.open(self.comparison/'reward-inputs.jsonl.gz','rt',encoding='utf-8') as stream:
             for line in stream:
                 row=json.loads(line)
+                if row['book'] is None:continue
                 original.setdefault(row['base'],row)
-                if len(original)==2: break
+                if len(original)==len(self.bases): break
         for b in self.bases:
             raw=json.loads((self.comparison/'fixtures'/f"lighter-subscribed-order_book-order_book-{self.meta[b]['id']}.json").read_text(encoding='utf-8'))
             parsed=parse_book(raw);book=Book();book.apply(*parsed[1:],self.start)
@@ -109,7 +124,7 @@ class FundingWatch:
 
     async def cycle(self):
         now=time.time();end=int(min(now,self.end));start=int(self.start//3600)*3600-3600
-        async with public_rest_lease(self.comparison):
+        async with self.lease():
             for base in self.bases:
                 m=self.meta[base]
                 for venue in ('ondo','lighter'):
@@ -148,7 +163,7 @@ class FundingWatch:
                     'note':'preceding settled timestamp; original publication delay not retrospectively proven'}
             else: seeds[base]=None
         data={'start_ts':self.start,'end_ts':self.end,'updated_ts':now,'rows':rows,'seeds':seeds,
-              'history':self.history,'orders_sent':0,'credentials_read':False,'errors':self.errors}
+              'history':self.history,'bases':list(self.bases),'orders_sent':0,'credentials_read':False,'errors':self.errors}
         self.save('hourly-latest.json',data)
         self.save('hourly-log.jsonl',{'fetched_ts':now,'rows':rows},True)
         self.save('status.json',{'updated_ts':time.time(),'state':'observing','matched_hours':sum(not r['missing'] for r in rows),

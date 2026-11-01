@@ -19,8 +19,9 @@ def price_proxies(comparison):
     with gzip.open(Path(comparison)/'reward-inputs.jsonl.gz','rt',encoding='utf-8') as stream:
         for line in stream:
             r=json.loads(line)
+            if r['book'] is None:continue
             b=r['book'];mid=(D(b['bids'][0][0])+D(b['asks'][0][0]))/2
-            out[r['base']].append((r['ts'],mid))
+            out.setdefault(r['base'],[]).append((r['ts'],mid))
     return out
 
 
@@ -38,7 +39,7 @@ def scenario_funding(comparison,hourly,base,distance,model,cutoff,prices=None):
         if (r['base'],r['distance'],r['model'])==(base,distance,model):
             events.append((r['ts'],'lighter',-D(r['signed_size'])))
     events.sort(key=lambda x:x[0])
-    prices=price_proxies(comparison)[base] if prices is None else prices[base]
+    prices=price_proxies(comparison).get(base,[]) if prices is None else prices.get(base,[])
     separated={v:[r for r in events if r[1]==v] for v in ('ondo','lighter')}
     cursors={'ondo':0,'lighter':0};positions={'ondo':D(0),'lighter':D(0)}
     total=D(0);unknown=[];known=[]
@@ -94,13 +95,13 @@ def write_funding_report(comparison,folder,paper_data=None):
     exits={r['base']:r for r in load_lines(folder/'exit-cost-proxies.jsonl')}
     prices=price_proxies(comparison)
     stats={};holds={}
-    for base in ('BTC','ETH'):
+    for base in data.get('bases',('BTC','ETH')):
         rows=[r for r in data['rows'] if r['base']==base]
         seed=data['seeds'].get(base)
         stats[base]=summarize(rows,seed['difference'] if seed else None)
         exit_=exits.get(base)
         if exit_ and data['updated_ts']-exit_['ts']>5400: exit_=None
-        holds[base]=hold_result(base,rows,stats[base],entries.get(base),exit_,prices[base])
+        holds[base]=hold_result(base,rows,stats[base],entries.get(base),exit_,prices.get(base,[]))
     result={'updated_ts':data['updated_ts'],'statistics':stats,'fixed_quantity_holds':holds,'rows':data['rows'],
             'orders_sent':0,'credentials_read':False}
     lines=['# 시간당 확정 펀딩 비교', '',
@@ -112,7 +113,7 @@ def write_funding_report(comparison,folder,paper_data=None):
         share=f"{s['dominant_sign']} {D(s['dominant_sign_fraction'])*100:.1f}%" if s['dominant_sign_fraction'] is not None else '누락'
         lines.append(f"| {b} | {s['hours_paired']}/{s['hours_expected']} | {number(mean)} | {number(median)} | {share} | {s['longest_positive_hourly_streak']}/{s['longest_negative_hourly_streak']} |")
     lines+=['', '## 초기 명목 200USD 이내인 동일 수량 쌍', '',
-            '시작 전 마지막 확정 시각의 차이로 방향을 고정한다. 매시간 사후에 유리한 방향으로 바꾸지 않는다. 초기 시점의 API 공개 지연은 소급 검증되지 않았다. BTC/ETH 200USD 쌍은 별도 대안이며 기존 가상 재고에 추가 자본처럼 합산하지 않는다.', '',
+            '시작 전 마지막 확정 시각의 차이로 방향을 고정한다. 매시간 사후에 유리한 방향으로 바꾸지 않는다. 초기 시점의 API 공개 지연은 소급 검증되지 않았다. 각 마켓의 200USD 쌍은 별도 대안이며 기존 가상 재고에 추가 자본처럼 합산하지 않는다.', '',
             '| 마켓 | 고정 방향 | 동일 수량 | 보유 펀딩 USDC | 진입+정리 후 펀딩 USDC | 가격차 변화 평가손익 | 합계 모형 USDC |', '|---|---|---:|---:|---:|---:|---:|']
     for b,h in holds.items():
         lines.append(f"| {b} | {h.get('direction','신호 없음')} | {h.get('quantity','-')} | {number(h.get('gross_usdc'))} | {number(h.get('funding_less_entry_exit_usdc'))} | {number(h.get('basis_mark_pnl_usdc'))} | {number(h.get('total_with_basis_usdc'))} |")
@@ -121,8 +122,8 @@ def write_funding_report(comparison,folder,paper_data=None):
             '누락 시간은 위 시간 수 및 funding-data.json의 missing_hours/rows에서 확인한다. 주간 전체가 끝나기 전의 누적액을 1주 실제 수익으로 표시하지 않는다.']
     if paper_data is not None:
         combined=[]
-        lines+=['', '## 기존 6개 조건에 같은 가상 재고의 확정률 펀딩 반영', '',
-                '기존 예상 펀딩을 제거하고 확정률 기반 추정으로 교체한다. 200USD 별도 쌍의 이익을 덧붙이지 않는다. 모형별 12행을 보존하며 실제 수익이 아니다.', '',
+        lines+=['', f"## {len(data.get('bases',('BTC','ETH')))*3}개 조건에 같은 가상 재고의 확정률 펀딩 반영", '',
+                '기존 예상 펀딩을 제거하고 확정률 기반 추정으로 교체한다. 200USD 별도 쌍의 이익을 덧붙이지 않는다. 모형별 내역을 보존하며 실제 수익이 아니다.', '',
                 '| 마켓 | bps | 모형 | 펀딩 전 순손익 범위 | 확정률 기반 펀딩 | 펀딩 후 순손익 범위 |', '|---|---:|---|---|---:|---|']
         for row in paper_data['rows']:
             f=scenario_funding(comparison,data['rows'],row['base'],row['distance_bps'],row['model'],paper_data['updated_ts'],prices=prices)

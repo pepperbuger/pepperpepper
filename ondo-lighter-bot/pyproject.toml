@@ -12,6 +12,7 @@ dependencies = [
     "pyyaml>=6",
     "python-dotenv>=1",
     "lighter-sdk>=1.1.8",
+    "tzdata>=2025.2; platform_system == 'Windows'",
 ]
 
 [project.optional-dependencies]

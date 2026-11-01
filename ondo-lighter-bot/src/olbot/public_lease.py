@@ -25,7 +25,7 @@ async def public_rest_lease(comparison, timeout=60):
             if time.monotonic()>deadline: raise TimeoutError('public REST still active')
             await asyncio.sleep(.1)
         await asyncio.sleep(1.1)
-        yield
+        yield token
     finally:
         if acquired:
             await asyncio.sleep(1.1)
