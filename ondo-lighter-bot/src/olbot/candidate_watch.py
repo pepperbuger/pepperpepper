@@ -125,10 +125,11 @@ class CandidateWatch(Watch):
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',required=True);p.add_argument('--policy',required=True)
     p.add_argument('--deadline',required=True);p.add_argument('--rest-coordination',required=True)
+    p.add_argument('--resume-hedged',action='store_true',help='Explicit approved recovery of exactly reconciled virtual state; keep original deadline')
     a=p.parse_args(argv);deadline=datetime.fromisoformat(a.deadline).timestamp()
     if not time.time()<deadline<=time.time()+604800:p.error('invalid fixed research deadline')
-    if (Path(a.output)/'summary.json').exists():p.error('preserve existing candidate cohort; no implicit restart')
-    asyncio.run(CandidateWatch(a.output,a.policy,deadline,rest_coordination=a.rest_coordination).run())
+    if (Path(a.output)/'summary.json').exists() and not a.resume_hedged:p.error('preserve existing candidate cohort; no implicit restart')
+    asyncio.run(CandidateWatch(a.output,a.policy,deadline,resume_hedged=a.resume_hedged,rest_coordination=a.rest_coordination).run())
     return 0
 
 

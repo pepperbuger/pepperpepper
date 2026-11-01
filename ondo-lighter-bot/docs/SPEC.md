@@ -122,7 +122,7 @@ ondo-lighter-bot/
     paper.py              순수 공개 파서·호가 복원·가상 부분 체결·300ms 비용/위험 모형
     paper_watch.py        공개 WS 수집·주간 보상 원본 보존·6조건/12모형 보고서 (키/실주문 없음)
     paper_recovery.py     가상 체결/헷지 저널과 체크포인트 대사, 현금흐름·헷지된 재고 복구
-    candidate_watch.py    META/TSLA/NVDA/XAG/XAU/WTI 별도 공개 WS 관측·미국장 시간대
+    candidate_watch.py    TradFi6개 공개 WS·미국장 분류·명시적 검증 재개(원래 기간/위험 유지)
     public_budget.py      프로세스 간 공개 GET 잠금·1.1초 간격·공개 URL 제한·요청 감사 기록
     close_positions.py    승인된 잔여 LIT/ENA 단발 정리, 기본 조회·reduce-only IOC4건·전송 전 저널·불명 재전송 금지
     public_lease.py       별도 공개 수집기 간 REST 직렬화, 다른 소유자의 pause 보존
@@ -250,6 +250,8 @@ SQLite 테이블(`data/olbot.sqlite`):
 - 수요일 USDC 지급 후: 마켓별 1,000 USD-시간당 리워드 계산 -> 2주차 마켓과 크기 결정.
 
 ## 8. 구현 순서 (Claude Code에 단계별로 요청)
+
+2026-11-02 PC 재가동 후 공개 재개 완료: TradFi CLI에도 명시적 `--resume-hedged`를 연결해 기존 36개 모형의 엄격한 저널 검증을 그대로 적용했다. 승인 없는 덮어쓰기·불일치 복구는 거부한다. 작업본·설치본 각각335개 테스트 통과 후 기존BTC/ETH 포함48개 가상 상태를 보존해 다섯 공개 작업자를 재개했다. 약8시간15분 관측 누락과 기존 시작/마감·펀딩first_seen·진입 기준을 유지한다. 실제 주문·키 사용0. 상세 `docs/PUBLIC_RESUME_20261102.md`.
 
 2026-11-01 공개 재개 검증 완료:19:07 KST 기존BTC/ETH 가상 상태를 보존해 복구하고 신규TradFi6개를 별도 관측으로 시작했다. 사용자가 별도 프로젝트의 공통 요청 한도 적용·1회 재개도 승인했다. 다섯 작업자에서 새 표본과 펀딩 원문, 실제 GET 간격 최소1.08초, 활성 오류 로그0을 확인했다. 작업본·설치본333개 및 별도 프로젝트 계산9개 통과. 실제 주문0, 키·기존config·거래data 접근0. 상세는 `docs/PUBLIC_RESUME_20261101.md`다.
 

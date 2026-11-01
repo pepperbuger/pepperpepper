@@ -23,17 +23,17 @@ from olbot.funding_watch import FundingWatch
 ROOT=Path(__file__).parent.parent
 
 
-def saved_virtual_run(folder,monkeypatch):
+def saved_virtual_run(folder,monkeypatch,bases=('BTC','ETH')):
     monkeypatch.setattr('olbot.paper_watch.time.time',lambda:150)
-    w=Watch(folder,'unused',1000);w.started=100
-    for b in ('BTC','ETH'):
+    w=(CandidateWatch if bases==BASES else Watch)(folder,'unused',1000);w.started=100
+    for b in bases:
         for d in (5,10,18):
             for m in ('touch','through'):w.scenarios.append(Scenario(b,d,m,D('.01'),D('.01'),D(10),D('.01')))
     summary=w.summary(110);r=summary['rows'][0]
     r.update(fills=1,hedges=1,costed_fills=1,position='1',lighter_position='-1',maker_fees_usd='.01',fill_notional_usd='100',
              basis_cost_usd='-1',delay_cost_usd='0',spread_depth_cost_usd='0',accumulation_cost_usd='0',killed='preserved_risk_stop')
-    fill={'base':'BTC','distance':5,'model':'touch','side':'buy','size':'1','price':'100','maker_fee':'.01','recv_ts':105}
-    hedge={'base':'BTC','distance':5,'model':'touch','signed_size':'1','execution':'101','basis_usd':'-1','delay_usd':'0','spread_usd':'0','delay_sec':.4,'ts':106}
+    fill={'base':bases[0],'distance':5,'model':'touch','side':'buy','size':'1','price':'100','maker_fee':'.01','recv_ts':105}
+    hedge={'base':bases[0],'distance':5,'model':'touch','signed_size':'1','execution':'101','basis_usd':'-1','delay_usd':'0','spread_usd':'0','delay_sec':.4,'ts':106}
     w.write('summary.json',summary);w.write('fills.jsonl',fill,True);w.write('hedges.jsonl',hedge,True)
     return summary
 
@@ -48,6 +48,31 @@ def test_hedged_recovery_reconstructs_cash_inventory_costs_without_clearing_risk
     assert s.funding_unknown_seconds==40 and s.killed=='preserved_risk_stop'
     assert not s.orders and s.pending is None and restored.deadline==1000
     assert json.loads((tmp_path/'summary.json').read_text(encoding='utf-8'))==prior
+
+
+def test_candidate_cli_requires_explicit_resume_and_restores_all36_models(tmp_path,monkeypatch):
+    from olbot.candidate_watch import main
+    prior=saved_virtual_run(tmp_path,monkeypatch,BASES);seen=[]
+    async def run(w):
+        w.scenarios=[Scenario(r['base'],r['distance_bps'],r['model'],D('.01'),D('.01'),D(10),D('.01')) for r in prior['rows']]
+        w.restore_flat_observations();seen.append(w)
+    monkeypatch.setattr(CandidateWatch,'run',run)
+    args=['--output',str(tmp_path),'--policy','unused','--deadline','1970-01-01T00:16:40+00:00','--rest-coordination',str(tmp_path/'shared')]
+    with pytest.raises(SystemExit):main(args)
+    assert not seen and json.loads((tmp_path/'summary.json').read_text(encoding='utf-8'))==prior
+    assert main(args+['--resume-hedged'])==0
+    w=seen[0];s=w.scenarios[0]
+    assert len(w.scenarios)==36 and (s.cash,s.pos,s.lpos)==(D('.99'),D(1),D(-1))
+    assert w.started==100 and w.deadline==1000 and s.killed=='preserved_risk_stop'
+    assert len(w.interruption_gaps)==1 and not s.orders and s.pending is None
+
+
+def test_candidate_cli_resume_still_refuses_inconsistent_journal(tmp_path,monkeypatch):
+    from olbot.candidate_watch import main
+    prior=saved_virtual_run(tmp_path,monkeypatch,BASES);prior['rows'][0]['position']='2'
+    (tmp_path/'summary.json').write_text(json.dumps(prior),encoding='utf-8')
+    args=['--output',str(tmp_path),'--policy','unused','--deadline','1970-01-01T00:16:40+00:00','--rest-coordination',str(tmp_path/'shared'),'--resume-hedged']
+    with pytest.raises(ValueError):main(args)
 
 
 @pytest.mark.parametrize('change',[{'pending_hedge':True},{'fills':2},{'position':'2'},{'basis_cost_usd':'0'},{'costed_fills':0}])
