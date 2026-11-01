@@ -92,6 +92,7 @@ ondo-lighter-bot/
   docs/LIVE_10MIN_RESULT.md 메인 봇 10분 실측과 남은 검증 항목
   scripts/
     ondo_depth_probe.py   마켓 선별용 읽기 전용 측정기 (완성)
+  docs/RESEARCH_CANDIDATES.md  BTC·ETH·META 기본 검토 후보, 주식 시간대·동일 자본 비교 기준
   src/olbot/
     main.py               실행 진입점: check-config, watch 명령 (완성)
     config.py             설정과 비밀값 로딩, 검증 (완성)
@@ -245,6 +246,8 @@ SQLite 테이블(`data/olbot.sqlite`):
 - 수요일 USDC 지급 후: 마켓별 1,000 USD-시간당 리워드 계산 -> 2주차 마켓과 크기 결정.
 
 ## 8. 구현 순서 (Claude Code에 단계별로 요청)
+
+2026-11-01 후보 등록 완료: 사용자가 META를 기본 검토 후보에 추가해 BTC·ETH·META로 정리했다. `docs/RESEARCH_CANDIDATES.md`의 자본500 USD·장중/야간/주말·후속 새 시작 시각 기준을 따른다. 기존 BTC/ETH 모형·정책과 실제 설정을 바꾸거나 수집기를 재시작하지 않았다. 중단 기록·가상 체결 이력은 보존한다. META live나3개 마켓 동시 운영 승인은 아니다.
 
 2026-10-31 공개 복구 경로 완료: 사용자 재개 승인 후 가상 체결/헷지 이벤트 없음·모든 가상 포지션0일 때만 원래 기간을 이어받는다. 보상 표본·초기 fixture·펀딩 first_seen·정지 상태를 보존하고 누락을 표시한다. 전체 기간 순이익은 누락 시 산출 불가다. 펀딩 확정 이력·복구 회귀 포함318개 통과. 새 실주문 없음.
 
