@@ -64,6 +64,8 @@
 
 ### 1-3. 실측 데이터 (2026-10-27 08:55 UTC, `scripts/ondo_depth_probe.py`)
 
+계정수수료정정(2026-11-04): 위Standard표는일반규칙이다. 실제계정 `accountLimits`는Premium·maker fee tick40/taker fee tick280이며 [공식 수수료](https://docs.lighter.xyz/trading/trading-fees.md)의무스테이킹Premium maker0.0040%/taker0.0280%와맞는다. [BTC실측 결과](BTC_LIVE_TRIAL_RESULT.md)의총비용은전후자산감소를사용한다. 과거정리helper의Lighter fee0은실제수수료로쓰지않는다. 다음live는현재계정수수료를반영해야하며계정등급은자동변경하지않는다.
+
 - Ondo 활성 퍼프 73개 중 63개가 Lighter에도 같은 심볼로 있다. 주식, 지수, 금, 은, 원유(WTI), 외환까지 겹친다.
 - Ondo 전용(헷지 불가): BRENT, COPPER, DKNG, GLW, NFLX, NKE, PURR, SKHYNIX, SMSN, URNM.
 - 중간가 +-25bps 안 호가 물량(양쪽 합):
@@ -252,6 +254,8 @@ SQLite 테이블(`data/olbot.sqlite`):
 - 수요일 USDC 지급 후: 마켓별 1,000 USD-시간당 리워드 계산 -> 2주차 마켓과 크기 결정.
 
 ## 8. 구현 순서 (Claude Code에 단계별로 요청)
+
+2026-11-04 BTC실측완료: 명시적1회승인후11월3일10분호가·maker체결1건·반대IOC헷지1건·정리2건전량확정. 열린주문대사9회/불일치0, 같은호가약52초뒤open확인. 최종모든포지션/활성주문/미확정0을다음날도재확인했다. 총비용0.034696USDC·보상액미확인. 실제Lighter는Premium이어서Standard/fee0가정을정정한다. 이번후속은문서·로컬조회/집계이며코드검증기준은작업본/설치본351개통과다. 완료runner를재실행하거나상시운영/공개수집을자동재개하지않는다. 상세 `docs/BTC_LIVE_TRIAL_RESULT.md`.
 
 2026-11-03 BTC 실거래 준비 완료·실행 승인 대기: 현재 Rewards UI의 자격 조건을 확인하되 마켓별 배분을 모르는 상태를 금액0이나5,625로 만들지 않는다. `scope: eligibility_only` 정책은 live 자격/만료 검사에만 쓰고, 금액 모형의 기본 loader는 거부한다. `accountOrders`의 종료 주문24시간/최근1,000건 제한을 공식 SDK 문서에서 확인했다. 번호가 없으면`accountInactiveOrders`를 최대3페이지·100건씩 정확한ID로 찾고, 찾지 못하면미확정 유지·이력재조회30초 대기를 적용한다. 기존 수량/포지션 정확 일치 규칙은 유지한다. BTC 정리는 별도 모듈·새 저널·최대2건이며 예전LIT/ENA승인을 재사용하지 않는다. 작업본/설치본351개, 키8개, 온라인 설정, 메모리DB의30초 실제시세 주문없는 검증 통과. 실제 주문0.
 
