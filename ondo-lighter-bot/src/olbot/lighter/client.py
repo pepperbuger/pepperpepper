@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from urllib.parse import urlencode
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
@@ -140,6 +141,7 @@ class LighterTrader:
         self._last_coi = 0
         self._auth_token: str | None = None
         self._auth_token_ts = 0.0
+        self._history_probe_ts: dict[int, float] = {}
 
     async def connect(self) -> None:
         import lighter  # 무거운 의존성이라 실제 거래할 때만 불러온다
@@ -221,6 +223,36 @@ class LighterTrader:
         for order in data.get("orders") or []:
             if int(order.get("client_order_index", -1)) == client_order_index:
                 return parse_order_status(order)
+        # Official accountOrders retains only the last1K inactive orders within24h.
+        # A missing order can still exist in the cursor-paginated inactive history.
+        now=time.monotonic()
+        if now-self._history_probe_ts.get(client_order_index,float('-inf'))<30:
+            return None
+        self._history_probe_ts[client_order_index]=now
+        if len(self._history_probe_ts)>256:self._history_probe_ts.pop(next(iter(self._history_probe_ts)))
+        return await self._historical_order_status(client_order_index)
+
+    async def _historical_order_status(self, client_order_index: int) -> OrderStatus | None:
+        """Bounded exact-ID history lookup. Absence still never means rejected/unfilled."""
+        cursor=None;seen=set()
+        for _ in range(3):
+            params={'account_index':self.account_index,'limit':100}
+            if cursor is not None:params['cursor']=cursor
+            data=await get_json(self.base_url+'/api/v1/accountInactiveOrders?'+urlencode(params),
+                                headers={'authorization':self._auth()})
+            if int(data.get('code',200))!=200:raise RuntimeError(f"accountInactiveOrders code {data.get('code')}")
+            rows=data.get('orders')
+            if not isinstance(rows,list):raise OrderStatusError('inactive orders list missing')
+            matches=[r for r in rows if int(r.get('client_order_index',-1))==client_order_index]
+            if len(matches)>1:raise OrderStatusError('duplicate historical client_order_index')
+            if matches:
+                status=parse_order_status(matches[0])
+                if not status.terminal:raise OrderStatusError('inactive order has nonterminal status')
+                return status
+            cursor=data.get('next_cursor')
+            if not cursor:return None
+            if not isinstance(cursor,str) or cursor in seen:raise OrderStatusError('invalid/repeated history cursor')
+            seen.add(cursor)
         return None
 
     async def recent_orders(self, limit: int = 5) -> list[dict]:

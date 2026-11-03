@@ -14,7 +14,7 @@ class RewardPolicy:
     starts: float
     ends: float  # exclusive UTC boundary
     allowed_bases: frozenset[str]
-    per_market_usdc: Decimal
+    per_market_usdc: Decimal | None  # None only for explicitly eligibility-only live guards.
 
     def block_reason(self, bases: list[str], now: float) -> str | None:
         if not self.starts <= now < self.ends:
@@ -25,7 +25,7 @@ class RewardPolicy:
         return None
 
 
-def load_policy(path: str | Path) -> RewardPolicy:
+def load_policy(path: str | Path, *, require_pool: bool = True) -> RewardPolicy:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     # UTC offset 필수. PC 현지 시간에 따라 정책 경계가 변하지 않는다.
     dates = [datetime.fromisoformat(raw[k]) for k in ("starts_utc", "ends_utc")]
@@ -34,8 +34,16 @@ def load_policy(path: str | Path) -> RewardPolicy:
     bases = raw["allowed_bases"]
     if not isinstance(bases, list) or not bases or any(not isinstance(b, str) or not b or b != b.upper() for b in bases):
         raise ValueError("리워드 정책 대상 목록 오류")
-    pool = Decimal(raw["per_market_usdc"])
-    if not pool.is_finite() or pool <= 0 or not raw["source"].startswith("https://app.ondoperps.xyz/announcements/"):
+    eligibility_only = raw.get("scope") == "eligibility_only"
+    if eligibility_only:
+        if require_pool or raw["per_market_usdc"] is not None or raw["source"] != "https://app.ondoperps.xyz/rewards":
+            raise ValueError("자격 확인 전용 자료: 마켓별 보상 추정에는 사용할 수 없음")
+        pool = None
+    else:
+        pool = Decimal(raw["per_market_usdc"])
+    if (pool is not None and (not pool.is_finite() or pool <= 0)) or not (
+            raw["source"].startswith("https://app.ondoperps.xyz/announcements/")
+            or eligibility_only and raw["source"] == "https://app.ondoperps.xyz/rewards"):
         raise ValueError("리워드 정책 금액/공식 출처 오류")
     return RewardPolicy(raw["source"], dates[0].timestamp(), dates[1].timestamp(), frozenset(bases), pool)
 
@@ -46,4 +54,4 @@ def policy_for_config(cfg) -> RewardPolicy | None:
     path = Path(cfg.rewards.policy_path)
     if not path.is_absolute():
         path = (cfg.path.parent if cfg.path else Path.cwd()) / path
-    return load_policy(path)
+    return load_policy(path, require_pool=False)

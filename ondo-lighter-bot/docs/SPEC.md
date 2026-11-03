@@ -93,6 +93,7 @@ ondo-lighter-bot/
   scripts/
     ondo_depth_probe.py   마켓 선별용 읽기 전용 측정기 (완성)
   docs/RESEARCH_CANDIDATES.md  BTC·ETH 및 TradFi6개 공개 비교, 시간대·독립 자본 기준
+  docs/BTC_LIVE_TRIAL_PLAN.md BTC10분 시험 제안·확인한 자격/미확인 배분·승인 대기 범위
   docs/PUBLIC_RESUME_20261101.md  실제 공개 재개 결과·공유 요청 예산·증거 위치·기간 한계
   src/olbot/
     main.py               실행 진입점: check-config, watch 명령 (완성)
@@ -125,6 +126,7 @@ ondo-lighter-bot/
     candidate_watch.py    TradFi6개 공개 WS·미국장 분류·명시적 검증 재개(원래 기간/위험 유지)
     public_budget.py      프로세스 간 공개 GET 잠금·1.1초 간격·공개 URL 제한·요청 감사 기록
     close_positions.py    승인된 잔여 LIT/ENA 단발 정리, 기본 조회·reduce-only IOC4건·전송 전 저널·불명 재전송 금지
+    btc_cleanup.py        새 BTC 시험의 별도 정리: 승인필수·100USD/거래소·20bps·2USD·최대2건·불명/부분 정지
     public_lease.py       별도 공개 수집기 간 REST 직렬화, 다른 소유자의 pause 보존
     funding.py            공개 확정 펀딩 파서·시간 정렬·부호/누락/고정 방향 통계
     funding_watch.py      매시간 공개 확정 이력 수집·시간표·200USD 비용 기준, 키/주문 없음
@@ -250,6 +252,8 @@ SQLite 테이블(`data/olbot.sqlite`):
 - 수요일 USDC 지급 후: 마켓별 1,000 USD-시간당 리워드 계산 -> 2주차 마켓과 크기 결정.
 
 ## 8. 구현 순서 (Claude Code에 단계별로 요청)
+
+2026-11-03 BTC 실거래 준비 완료·실행 승인 대기: 현재 Rewards UI의 자격 조건을 확인하되 마켓별 배분을 모르는 상태를 금액0이나5,625로 만들지 않는다. `scope: eligibility_only` 정책은 live 자격/만료 검사에만 쓰고, 금액 모형의 기본 loader는 거부한다. `accountOrders`의 종료 주문24시간/최근1,000건 제한을 공식 SDK 문서에서 확인했다. 번호가 없으면`accountInactiveOrders`를 최대3페이지·100건씩 정확한ID로 찾고, 찾지 못하면미확정 유지·이력재조회30초 대기를 적용한다. 기존 수량/포지션 정확 일치 규칙은 유지한다. BTC 정리는 별도 모듈·새 저널·최대2건이며 예전LIT/ENA승인을 재사용하지 않는다. 작업본/설치본351개, 키8개, 온라인 설정, 메모리DB의30초 실제시세 주문없는 검증 통과. 실제 주문0.
 
 2026-11-02 PC 재가동 후 공개 재개 완료: TradFi CLI에도 명시적 `--resume-hedged`를 연결해 기존 36개 모형의 엄격한 저널 검증을 그대로 적용했다. 승인 없는 덮어쓰기·불일치 복구는 거부한다. 작업본·설치본 각각335개 테스트 통과 후 기존BTC/ETH 포함48개 가상 상태를 보존해 다섯 공개 작업자를 재개했다. 약8시간15분 관측 누락과 기존 시작/마감·펀딩first_seen·진입 기준을 유지한다. 실제 주문·키 사용0. 상세 `docs/PUBLIC_RESUME_20261102.md`.
 

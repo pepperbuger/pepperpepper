@@ -11,7 +11,7 @@ from olbot.engine import Engine
 from olbot.ledger import Ledger
 from olbot.quoter import QuoteSide, TargetQuotes
 from olbot.reward_probe import depth_summary, observe, share_scenario
-from olbot.rewards import load_policy
+from olbot.rewards import load_policy, policy_for_config
 
 ROOT = Path(__file__).parent.parent
 POLICY = ROOT / 'docs/rewards-2026-10-27.json'
@@ -24,6 +24,27 @@ def test_week_boundary_and_ineligible_lit_ena():
     assert p.block_reason(['BTC'], p.ends)
     assert p.block_reason(['BTC'], p.starts - .001)
     assert 'LIT' in p.block_reason(['LIT', 'ENA'], p.starts)
+
+
+def eligibility_record():
+    return {'source':'https://app.ondoperps.xyz/rewards','scope':'eligibility_only',
+            'starts_utc':'2026-11-03T00:00:00+00:00','ends_utc':'2026-11-10T00:00:00+00:00',
+            'allowed_bases':['BTC'],'per_market_usdc':None}
+
+
+def test_current_ui_eligibility_guards_live_without_inventing_market_pool(tmp_path):
+    path=tmp_path/'eligibility.json';path.write_text(json.dumps(eligibility_record()))
+    cfg=load_config(ROOT/'config.live-500.example.yaml');cfg.rewards.policy_path=str(path)
+    p=policy_for_config(cfg)
+    assert p.per_market_usdc is None and p.block_reason(['BTC'],p.starts) is None
+    assert p.block_reason(['META'],p.starts) and p.block_reason(['BTC'],p.ends)
+    with pytest.raises(ValueError,match='마켓별'):load_policy(path)
+
+
+@pytest.mark.parametrize('change',[{'per_market_usdc':'5625'},{'source':'https://example.com/rewards'}])
+def test_eligibility_only_record_cannot_smuggle_estimated_pool_or_unofficial_source(tmp_path,change):
+    raw=eligibility_record();raw.update(change);path=tmp_path/'p.json';path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError):load_policy(path,require_pool=False)
 
 
 @pytest.mark.parametrize('field,value', [('starts_utc', '2026-10-27T00:00:00'),
