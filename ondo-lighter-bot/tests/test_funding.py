@@ -36,6 +36,42 @@ def test_actual_hourly_units_and_lighter_sign_match_actual_ws_settlement():
     assert ondo[1793361600]['settled_ts']>1793361600  # actual first tick, not rounded settlement
 
 
+def test_actual_ondo_first_tick_can_settle_more_than_one_minute_after_boundary():
+    rows=parse_ondo_history(raw('ondo-BTC-delayed-settlement.json'),'BTC-USD.P')
+    h=int(datetime(2026,11,2,15,tzinfo=timezone.utc).timestamp())
+    assert len(rows)==3 and D(rows[h]['rate'])==D('.0000125')
+    assert rows[h]['settled_ts']==datetime.fromisoformat('2026-11-02T15:03:54.896752+00:00').timestamp()
+    assert rows[h]['settled_ts']>h+60
+
+
+@pytest.mark.parametrize('stamp',[1793631600+234,1793631600000])
+def test_lighter_and_default_hour_validation_remain_strict(stamp):
+    with pytest.raises(ValueError):hour_stamp(stamp)
+    data=raw('lighter-BTC-history.json');data['fundings'][0]['timestamp']=stamp
+    with pytest.raises(ValueError):parse_lighter_history(data)
+
+
+def test_delayed_ondo_rows_cannot_overwrite_another_settlement_in_same_hour():
+    data=raw('ondo-BTC-delayed-settlement.json')
+    duplicate=copy.deepcopy(next(r for r in data['result'] if 'T15:' in r['time']))
+    duplicate['time']='2026-11-02T15:00:00.1Z';data['result'].append(duplicate)
+    with pytest.raises(ValueError,match='duplicate'):parse_ondo_history(data,'BTC-USD.P')
+
+
+def test_delayed_ondo_settlement_uses_inventory_at_actual_tick(tmp_path):
+    parsed=parse_ondo_history(raw('ondo-BTC-delayed-settlement.json'),'BTC-USD.P')
+    h=int(datetime(2026,11,2,15,tzinfo=timezone.utc).timestamp());row=parsed[h]
+    with gzip.open(tmp_path/'reward-inputs.jsonl.gz','wt',encoding='utf-8') as stream:
+        stream.write(json.dumps({'base':'BTC','ts':h+200,'book':{'bids':[['99','10']],'asks':[['101','10']]}})+'\n')
+    (tmp_path/'fills.jsonl').write_text(json.dumps({'base':'BTC','distance':5,'model':'touch','recv_ts':h+120,'side':'buy','size':'1'})+'\n')
+    (tmp_path/'hedges.jsonl').write_text(json.dumps({'base':'BTC','distance':5,'model':'touch','ts':h+121,'signed_size':'1'})+'\n')
+    hourly=[{'base':'BTC','hour':h,'ondo_settled_ts':row['settled_ts'],'lighter_settled_ts':h,
+             'ondo_rate':row['rate'],'lighter_per_base_value':'.2','missing':[]}]
+    result=scenario_funding(tmp_path,hourly,'BTC',5,'touch',h+300)
+    assert D(result['credit_usdc'])==D('-.00125')
+    assert result['known_hours'][0]['ondo_position']=='1' and result['known_hours'][0]['lighter_position']=='0'
+
+
 @pytest.mark.parametrize('change',[{'rate':'NaN'},{'direction':'unknown'},{'rate':'-.001'},{'timestamp':1793358000000}])
 def test_unknown_sign_units_or_nonfinite_rate_do_not_become_zero(change):
     data=raw('lighter-BTC-history.json');data['fundings'][0].update(change)

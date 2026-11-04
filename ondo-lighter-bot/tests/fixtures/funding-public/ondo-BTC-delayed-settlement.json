@@ -1,0 +1,23 @@
+{
+  "success": true,
+  "result": [
+    {
+      "market": "BTC-USD.P",
+      "time": "2026-11-02T16:00:00.755875301Z",
+      "fundingRate": "0.0000125"
+    },
+    {
+      "market": "BTC-USD.P",
+      "time": "2026-11-02T15:03:54.896752592Z",
+      "fundingRate": "0.0000125"
+    },
+    {
+      "market": "BTC-USD.P",
+      "time": "2026-11-02T14:00:00.003191088Z",
+      "fundingRate": "0.0000125"
+    }
+  ],
+  "pageInfo": {
+    "nextCursor": null
+  }
+}

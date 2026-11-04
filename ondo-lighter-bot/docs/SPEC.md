@@ -130,7 +130,7 @@ ondo-lighter-bot/
     close_positions.py    승인된 잔여 LIT/ENA 단발 정리, 기본 조회·reduce-only IOC4건·전송 전 저널·불명 재전송 금지
     btc_cleanup.py        새 BTC 시험의 별도 정리: 승인필수·100USD/거래소·20bps·2USD·최대2건·불명/부분 정지
     public_lease.py       별도 공개 수집기 간 REST 직렬화, 다른 소유자의 pause 보존
-    funding.py            공개 확정 펀딩 파서·시간 정렬·부호/누락/고정 방향 통계
+    funding.py            공개 펀딩 파서·첫tick 지연/실제 정산시각 보존·부호/누락/고정 방향 통계
     funding_watch.py      매시간 공개 확정 이력 수집·시간표·200USD 비용 기준, 키/주문 없음
     funding_report.py     지급 시각별 가상 재고 재생·기존 예상 펀딩 교체·합산 보고
   tests/                  pytest
@@ -254,6 +254,8 @@ SQLite 테이블(`data/olbot.sqlite`):
 - 수요일 USDC 지급 후: 마켓별 1,000 USD-시간당 리워드 계산 -> 2주차 마켓과 크기 결정.
 
 ## 8. 구현 순서 (Claude Code에 단계별로 요청)
+
+2026-11-04 보상·펀딩 검토 완료: Jumper는경유자격/현금풀/인정거래량을확인할후보로추가했다. 별도공개GET으로8개마켓168시간을비교하며현재Premium비용을반영했다. 실제Ondo정산15:03:54행이응답전체를거부시키던문제는Ondo첫tick지연허용과실제settled_ts보존으로수정했다. Lighter시각/단위검사·중복UTC시간거부는유지하고실제fixture기반재현과지연정산재고계산을검증했다. 이전코드핵심재현2개실패→수정후전체356개통과. 원래관측공백/first_seen/정책/시작·마감은변경하지않고수집기/실거래를재개하지않았다. 상세 `docs/REWARD_FUNDING_REVIEW_20261104.md`.
 
 2026-11-04 BTC실측완료: 명시적1회승인후11월3일10분호가·maker체결1건·반대IOC헷지1건·정리2건전량확정. 열린주문대사9회/불일치0, 같은호가약52초뒤open확인. 최종모든포지션/활성주문/미확정0을다음날도재확인했다. 총비용0.034696USDC·보상액미확인. 실제Lighter는Premium이어서Standard/fee0가정을정정한다. 이번후속은문서·로컬조회/집계이며코드검증기준은작업본/설치본351개통과다. 완료runner를재실행하거나상시운영/공개수집을자동재개하지않는다. 상세 `docs/BTC_LIVE_TRIAL_RESULT.md`.
 

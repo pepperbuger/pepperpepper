@@ -11,7 +11,7 @@ def finite(value):
     return result
 
 
-def hour_stamp(timestamp):
+def hour_stamp(timestamp,*,allow_delayed_first_tick=False):
     if isinstance(timestamp,str):
         parsed=datetime.fromisoformat(timestamp.replace('Z','+00:00'))
         if parsed.tzinfo is None: raise ValueError('funding timezone required')
@@ -19,7 +19,10 @@ def hour_stamp(timestamp):
     else:
         stamp=int(timestamp)
     hour=int(stamp//3600)*3600
-    if not 0<=stamp-hour<60 or stamp<1_000_000_000 or stamp>10_000_000_000:
+    # Ondo applies the hourly rate on the first tick, which may arrive minutes
+    # after the boundary. Lighter's timestamp/unit validation stays strict.
+    max_offset=3600 if allow_delayed_first_tick else 60
+    if not 0<=stamp-hour<max_offset or stamp<1_000_000_000 or stamp>10_000_000_000:
         raise ValueError('not a seconds-based hourly settlement')
     return hour
 
@@ -30,7 +33,7 @@ def parse_ondo_history(data,market):
     rows={}
     for row in data['result']:
         if row['market']!=market: raise ValueError('Ondo funding market mismatch')
-        h=hour_stamp(row['time']);rate=finite(row['fundingRate'])
+        h=hour_stamp(row['time'],allow_delayed_first_tick=True);rate=finite(row['fundingRate'])
         if h in rows: raise ValueError('duplicate Ondo funding hour')
         rows[h]={'hour':h,'rate':str(rate),'settled_ts':datetime.fromisoformat(row['time'].replace('Z','+00:00')).timestamp()}
     return rows

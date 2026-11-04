@@ -8,6 +8,8 @@ Ondo Perps에 지정가(post-only) 호가를 걸어 USDC 리워드를 측정하�
 |---|---|
 | [OVERVIEW.md](OVERVIEW.md) | 개요: 무엇을, 왜 만드는지, 목표와 판단 기준 |
 | [docs/SPEC.md](docs/SPEC.md) | 설계서: 확인된 API 사실, 구조, 호가와 헷지 로직, 위험 관리, 측정, 구현 순서 |
+| [docs/JUMPER_CANDIDATE.md](docs/JUMPER_CANDIDATE.md) | Jumper 경유 보상의 분모·수수료·자격 검증 후보 |
+| [docs/REWARD_FUNDING_REVIEW_20261104.md](docs/REWARD_FUNDING_REVIEW_20261104.md) | 최근7일 펀딩과 현재 호가 보상 민감도, Premium 비용 반영 |
 | [CLAUDE.md](CLAUDE.md) | Claude Code가 이 폴더에서 지킬 규칙 (자동으로 읽힘) |
 | [config.live-500.example.yaml](config.live-500.example.yaml) | 500달러 실운영 설정 (LIT, ENA) |
 | [config.example.yaml](config.example.yaml) | 기본 설정 예시 (샌드박스/테스트넷 주소) |
@@ -15,6 +17,8 @@ Ondo Perps에 지정가(post-only) 호가를 걸어 USDC 리워드를 측정하�
 | [scripts/ondo_depth_probe.py](scripts/ondo_depth_probe.py) | 마켓 선별용 측정기. 지금 바로 실행 가능, API 키 불필요 |
 
 ## 진행 상황
+
+2026-11-04 보상·펀딩 검토: Jumper를 조건 검증 후보로 추가하고8개 마켓의 공개 확정 펀딩을168시간씩 비교했다. 고정200USD 명목의 참고값은 META+0.301·XAG+0.257·WTI+0.189USD, 비용/가격차 차감 전이다. 현재 Premium 왕복 비용도 비슷하거나 더 커서 펀딩만으로 주2USD 목표를 채울 근거는 약하다. 이번 주 마켓별 보상 풀과 실제 수령액은 미확인이다. 정각 후 늦은 실제 Ondo 정산을 파서가 거부하던 문제를 수정했고 전체356개 테스트가 통과했다. 기존 관측/실거래는 재개하지 않았다.
 
 2026-11-04 결과 정리: 별도 승인한 **BTC10분 시험과 잔량 정리 완료**, 최종 양쪽 포지션/활성주문/미확정0을 다음날에도 재확인했다. maker체결1건·반대헷지1건 전량확정, 호가 대사9회·불일치0, 같은 호가가약52초뒤에도open임을 확인했다. 정리2건을 포함한 총비용은 **0.034696USDC**다. [실측 결과](docs/BTC_LIVE_TRIAL_RESULT.md). 실제 Lighter 계정은 **Premium**으로 확인돼 이전Standard/수수료0 전제를 정정한다. 보상 수령액·주간 순수익은 아직 미확인이고 상시 운영/공개 수집 재개는 하지 않았다.
 
