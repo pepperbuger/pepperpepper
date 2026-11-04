@@ -183,3 +183,16 @@ asyncio.run(main())
     stamps=sorted(x['ts'] for x in calls)
     assert len(calls)==4 and len({x['pid'] for x in calls})==2
     assert all(b-a>=1.08 for a,b in zip(stamps,stamps[1:]))
+
+
+async def test_delayed_thread_dispatch_cannot_compress_actual_get_spacing(tmp_path,monkeypatch):
+    original=asyncio.to_thread;dispatches=[];calls=[]
+    async def delayed(func,*args,**kwargs):
+        dispatches.append(1)
+        if len(dispatches)==1:await asyncio.sleep(.12)
+        return await original(func,*args,**kwargs)
+    monkeypatch.setattr(asyncio,'to_thread',delayed)
+    def getter(url):calls.append(time.monotonic());return 1
+    for _ in range(2):
+        await public_get('https://api.ondoperps.xyz/v1/markets',tmp_path,getter=getter,spacing=.04)
+    assert calls[1]-calls[0]>=.04

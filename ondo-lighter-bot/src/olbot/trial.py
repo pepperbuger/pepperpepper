@@ -63,7 +63,16 @@ def save(path, state, *, first=False):
         file.flush()
         os.fsync(file.fileno())
     if not first:
-        os.replace(destination, path)
+        # Windows readers may briefly hold the destination without delete sharing.
+        # Never discard the durable temporary file or silently lose supervisor status.
+        for attempt in range(20):
+            try:
+                os.replace(destination, path)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(.05)
 
 
 def signed_positions(account):

@@ -58,8 +58,17 @@ async def public_get(url,coordination,*,owner=None,getter=None,spacing=1.1):
         async with disk_lock(folder):
             if paused():continue
             stamp=folder/'PUBLIC_REST_LAST.json'
-            previous=json.loads(stamp.read_text(encoding='utf-8'))['request_ts'] if stamp.exists() else 0
-            await asyncio.sleep(max(0,spacing-(time.time()-previous)))
+            previous=json.loads(stamp.read_text(encoding='utf-8')) if stamp.exists() else {}
+            # Wait from completed I/O, not pre-dispatch reservation: a delayed worker
+            # thread could otherwise start just before the next process's request.
+            completed=previous.get('completed_monotonic')
+            if completed is not None and 0 <= time.monotonic()-completed:
+                wait=max(0,spacing-(time.monotonic()-completed))
+            elif previous:
+                wait=spacing  # Old schema or a reboot: one full safe interval.
+            else:
+                wait=0
+            await asyncio.sleep(wait)
             if paused():continue
             token=uuid.uuid4().hex;active=folder/'REST_ACTIVE'
             active.write_text(token,encoding='utf-8')
@@ -74,5 +83,7 @@ async def public_get(url,coordination,*,owner=None,getter=None,spacing=1.1):
                     await task  # Keep the cross-process lock until the synchronous GET has ended.
                     raise
             finally:
+                stamp.write_text(json.dumps({'request_ts':request_ts,
+                    'completed_monotonic':time.monotonic(),'completed_ts':time.time()}),encoding='utf-8')
                 if active.exists() and active.read_text(encoding='utf-8')==token:active.unlink()
     raise TimeoutError('public REST paused')

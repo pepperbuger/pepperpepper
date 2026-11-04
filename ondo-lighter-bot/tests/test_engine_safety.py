@@ -7,6 +7,7 @@
 import asyncio
 from decimal import Decimal as D
 from pathlib import Path
+import pytest
 
 from olbot.config import Secrets, load_config
 from olbot.engine import Engine
@@ -292,3 +293,23 @@ async def test_stale_positions_pause_quoting(monkeypatch):
     eng.positions_ok_ts = clock["t"]
     await eng._risk_tick()
     assert eng.paused is None
+
+
+@pytest.mark.parametrize('position',[D('20'),D('-20')])
+async def test_inventory_above_market_limit_kills_even_when_exactly_hedged(monkeypatch,position):
+    eng = _risk_engine(monkeypatch, {'t':1000.0})
+    eng.mcfg['LIT'].max_inventory_usd=D('50')
+    state=eng.hedger.states['LIT'];state.ondo_pos=position;state.lighter_pos=-position
+    await eng._risk_tick()
+    assert eng.killed and '재고' in eng.killed
+
+
+async def test_total_inventory_limit_is_not_netted_between_markets(monkeypatch):
+    eng = _risk_engine(monkeypatch, {'t':1000.0})
+    eng.cfg.risk.max_total_inventory_usd=D('50')
+    for base,pos in [('LIT',D('10')),('ENA',D('-10'))]:
+        eng.board.update_ondo(base,D('2.999'),D('3.001'),1000)
+        eng.hedger.states[base].ondo_pos=pos
+        eng.hedger.states[base].lighter_pos=-pos
+    await eng._risk_tick()
+    assert eng.killed and '재고' in eng.killed

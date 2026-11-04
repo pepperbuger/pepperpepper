@@ -475,6 +475,15 @@ class Engine:
         if not self.live:
             self.paused = f"시세 WS 이상 {silent:.0f}초" if silent > r.ws_stale_sec else None
             return
+        # 재고 상한은 호가 방향 제한에 그치지 않고 실제 위험 정지로 연결한다.
+        # 양쪽 반대 포지션은 합산해 0으로 보지 않는다: Ondo 재고 명목가를 한 번 센다.
+        inventory_usd = {b: abs(self.inventory(b) * (self.ondo_mid(b) or self.lighter_mid(b) or Decimal(0)))
+                         for b in self.bases}
+        exceeded = [b for b, usd in inventory_usd.items() if usd > self.mcfg[b].max_inventory_usd]
+        if exceeded or sum(inventory_usd.values()) > r.max_total_inventory_usd:
+            if not self.killed:
+                await self.kill("재고 한도 초과: " + ", ".join(f"{b} {usd:.2f} USD" for b, usd in inventory_usd.items()))
+            return
         mids = {b: self.lighter_mid(b) or self.ondo_mid(b) or Decimal(0) for b in self.bases}
         # 노출 타이머는 대사 성공 여부와 상관없이 로컬 상태(체결 즉시 반영)로 매초 갱신한다.
         # 포지션 조회가 계속 실패해도 체결로 생긴 노출은 여기서 잡혀 max_unhedged_sec 뒤 kill된다.
