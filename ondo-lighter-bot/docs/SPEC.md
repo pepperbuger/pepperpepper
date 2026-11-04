@@ -130,6 +130,7 @@ ondo-lighter-bot/
     close_positions.py    승인된 잔여 LIT/ENA 단발 정리, 기본 조회·reduce-only IOC4건·전송 전 저널·불명 재전송 금지
     btc_cleanup.py        새 BTC 시험의 별도 정리: 승인필수·100USD/거래소·20bps·2USD·최대2건·불명/부분 정지
     public_lease.py       별도 공개 수집기 간 REST 직렬화, 다른 소유자의 pause 보존
+    eth_cleanup.py        ETH 측정 종료 정리: Standard0수수료 확인·100USD/leg·20bps·2USD·최대2건·불명/부분 정지
     funding.py            공개 펀딩 파서·첫tick 지연/실제 정산시각 보존·부호/누락/고정 방향 통계
     funding_watch.py      매시간 공개 확정 이력 수집·시간표·200USD 비용 기준, 키/주문 없음
     funding_report.py     지급 시각별 가상 재고 재생·기존 예상 펀딩 교체·합산 보고
@@ -254,6 +255,8 @@ SQLite 테이블(`data/olbot.sqlite`):
 - 수요일 USDC 지급 후: 마켓별 1,000 USD-시간당 리워드 계산 -> 2주차 마켓과 크기 결정.
 
 ## 8. 구현 순서 (Claude Code에 단계별로 요청)
+
+2026-11-04 ETH보상측정준비: 사용자가실제적립확인을위한호가를요청했다. ETH전용자격정책과별도설정(한쪽25USD·4bps·2USD자산정지), 새ETH정리모듈과재전송/Standard수수료검사를준비했다. 실제화면의이번주지급일은11월12일대기중이며현재적립금을즉시확정할수없다. 소액24시간측정/종료정리는구체범위승인대기이고아직주문0이다. 실제계정조회/주문없는시세검증을완료한준비결과를확인하고새실행저널없이과거승인을재사용하지않는다. 전체366개테스트통과. 상세 `docs/ETH_REWARD_MEASUREMENT_PLAN.md`.
 
 2026-11-04 보상·펀딩 검토 완료: Jumper는경유자격/현금풀/인정거래량을확인할후보로추가했다. 별도공개GET으로8개마켓168시간을비교하며현재Premium비용을반영했다. 실제Ondo정산15:03:54행이응답전체를거부시키던문제는Ondo첫tick지연허용과실제settled_ts보존으로수정했다. Lighter시각/단위검사·중복UTC시간거부는유지하고실제fixture기반재현과지연정산재고계산을검증했다. 이전코드핵심재현2개실패→수정후전체356개통과. 원래관측공백/first_seen/정책/시작·마감은변경하지않고수집기/실거래를재개하지않았다. 상세 `docs/REWARD_FUNDING_REVIEW_20261104.md`.
 

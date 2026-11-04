@@ -1,5 +1,7 @@
 # 집에서 연결 검증과 실운영 준비
 
+2026-11-04 신규요청: 사용자가실제적립확인을위해실제호가도넣자고요청했다. [ETH24시간측정안](ETH_REWARD_MEASUREMENT_PLAN.md)의금액/시간/정리/점검범위는별도최종승인대기다. `config.measure-eth.example.yaml`과ETH전용자격정책/정리모듈을준비했으며새주문은0이다. 기존BTC실행기/승인을다시사용하지않는다. 준비결과는task폴더 outputs/eth-reward-prep-20261104/ 에보존한다. 실제보상화면은이번주지급일11월12일대기중이다.
+
 2026-11-04 20:34 KST 최신 등급: 사용자가 직접 Standard로 전환했고 실제 계정 API에서도 Standard·일반 maker/taker 수수료0·Lighter 포지션/활성주문0을 확인했다. [등급 기록](ACCOUNT_TYPE_STATUS.md)을 우선한다. ETH 기본 후보/META TradFi1순위 비교는 Standard수수료0·공식300ms지연 기준이다. 아래Premium설명과시험비용은변경전이력이며원본은보존한다. 에이전트의등급변경/새주문/수집기재개는0이다.
 
 2026-11-04 추가 검토: [Jumper후보](JUMPER_CANDIDATE.md)와 [보상·펀딩 검토](REWARD_FUNDING_REVIEW_20261104.md)를추가했다. 별도공개조회로8개마켓×168시간을확보했으며기존관측기/실거래는재개하지않았다. Ondo지연정산파서수정·356개테스트를반영한다. 새비율조회가원래누락된가격/체결/보상정책을복구하는것은아니다. 실제보상은Portfolio→Account Activity→Transfers에서확인해야하며공개문서의Spot전용transfer를Perps보상총액으로쓰지않는다. 현재마켓별풀과수령액은미확인이다.
