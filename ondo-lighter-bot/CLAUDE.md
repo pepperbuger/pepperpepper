@@ -31,6 +31,8 @@
 
 ## Lighter 구현 주의 (Lighter 공식 AGENTS.md 요약)
 
+- 최신 등급(2026-11-04 20:34 KST): 사용자가 Standard로 직접 변경했고 읽기 전용 API에서 maker/taker fee tick0을 확인했다. [현재 등급 기록](docs/ACCOUNT_TYPE_STATUS.md)을 우선한다. 아래 Premium 및 과거 비용은 변경 전 이력이며 소급 수정하지 않는다. 다음 live 전 현재 등급/수수료를 재검사하고 Standard의300ms 지연 비용을 반영한다.
+
 - 가격과 수량은 정수(값 x 10^decimals). decimals는 `GET /api/v1/orderBookDetails`에서 받는다. 마켓 ID와 decimals를 하드코딩하지 않는다.
 - `min_base_amount`, `min_quote_amount`를 지킨다.
 - 논스는 API 키별로 1씩 증가한다. 키 하나당 전송을 직렬화한다. 결과가 불확실하면 다시 서명하기 전에 tx 상태와 nextNonce부터 확인한다(중복 주문 방지).
