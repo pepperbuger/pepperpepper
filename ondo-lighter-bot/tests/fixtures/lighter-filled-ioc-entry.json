@@ -1,0 +1,14 @@
+{
+  "status": "filled",
+  "market_index": 120,
+  "is_ask": true,
+  "initial_base_amount": "4.00",
+  "filled_base_amount": "4.00",
+  "filled_quote_amount": "12.500000",
+  "remaining_base_amount": "0.00",
+  "type": "market",
+  "time_in_force": "immediate-or-cancel",
+  "reduce_only": false,
+  "client_order_index": 43,
+  "owner_account_index": 7
+}

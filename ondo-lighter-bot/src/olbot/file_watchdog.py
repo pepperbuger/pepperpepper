@@ -1,0 +1,200 @@
+"""Local file-only watchdog. No exchange, credentials, orders, or routine model calls.
+
+An explicit --codex-exe/--thread bridge queues only a new incident or completion.
+Delivery is attempted once per incident; ambiguous delivery is never retransmitted.
+"""
+from __future__ import annotations
+
+import argparse
+import ctypes
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import time
+
+
+def read_json(path: Path) -> dict | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def atomic_save(path: Path, value: dict) -> None:
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(value, stream, ensure_ascii=True, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    for attempt in range(20):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(.05)
+
+
+def process_alive(pid: int) -> bool:
+    if os.name == "nt":
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            kernel.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+        finally:
+            kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def classify(status: dict | None, now: float, log_age: float | None,
+             parent_alive: bool, new_log: str = "") -> list[str]:
+    """Pure incident classifier; missing and stale positions are never treated as flat."""
+    if status and status.get("ended_ts"):
+        return ["execution_ended:" + str(status.get("phase", "unknown"))]
+    alerts = []
+    if not parent_alive:
+        alerts.append("trial_process_absent")
+    stamp = status.get("checked_ts") if status else None
+    fresh = isinstance(stamp, (int, float)) and 0 <= now - stamp <= 120
+    if not fresh:
+        alerts.append("status_stale")
+    if log_age is None or log_age > 120:
+        alerts.append("engine_log_stale")
+    if status and fresh:
+        if status.get("uncertain_outcome") or any(v.get("pending") for v in status.get("hedge_state", {}).values()):
+            alerts.append("uncertain_or_pending")
+        if status.get("killed"):
+            alerts.append("risk_killed")
+        if status.get("paused"):
+            alerts.append("quoting_paused")
+        if status.get("phase") == "halted":
+            alerts.append("execution_halted")
+    for marker, code in (("send outcome unknown", "unknown_order_log"),
+                         ("keeping unconfirmed", "unconfirmed_order_log"),
+                         (" ERROR ", "engine_error_log")):
+        if marker in new_log:
+            alerts.append(code)
+    return sorted(set(alerts))
+
+
+def send_to_chat(executable: str, thread: str, event_path: Path, codes: list[str], *, runner=subprocess.run) -> dict:
+    # No raw exchange response/log text or secrets enter the queued message.
+    message = ("LOCAL_FILE_WATCHDOG_EVENT: " + ",".join(codes) + ". "
+               "User requested event-only local monitoring. Read the event file " + str(event_path) +
+               " and current trial records, report only a material change. "
+               "This event is NOT new approval for orders, cancellation, cleanup, restart, keys or account changes. "
+               "Respect the latest explicit user scope and prior automatic-review blocks.")
+    try:
+        result = runner([executable, "queue", "--thread", thread, "--message", message, "--resume"],
+                        capture_output=True, text=True, timeout=25,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        warning = "warning" in (result.stderr + result.stdout).lower()
+        return {"attempted": True, "exit_code": result.returncode,
+                "queued_without_warning": result.returncode == 0 and not warning,
+                "cli_diagnostic": (result.stderr + result.stdout).strip()[:1500],
+                "delivery_to_model_proven": False, "retry": False}
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"attempted": True, "error_type": type(exc).__name__, "retry": False,
+                "delivery_to_model_proven": False}
+
+
+def desktop_alert(codes: list[str]) -> None:
+    if os.name != "nt":
+        return
+    import base64
+    # Codes are generated by classify, never untrusted log text.
+    text = ("Ondo ETH: " + ", ".join(codes)).replace("'", "''")
+    script = ("Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; "
+              "$n=New-Object System.Windows.Forms.NotifyIcon; "
+              "$n.Icon=[System.Drawing.SystemIcons]::Warning; $n.Visible=$true; "
+              "$n.ShowBalloonTip(8000,'Ondo bot alert','" + text + "',[System.Windows.Forms.ToolTipIcon]::Warning); "
+              "Start-Sleep -Seconds 10; $n.Dispose()")
+    subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+                      "-EncodedCommand", base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=subprocess.CREATE_NO_WINDOW)
+
+
+def run(folder: Path, *, codex_exe: str | None = None, thread: str | None = None,
+        interval: float = 10, once: bool = False) -> None:
+    folder = folder.resolve()
+    launch = read_json(folder / "launch.json")
+    if not launch or not launch.get("parent_pid"):
+        raise ValueError("existing trial launch required; never create or start a trading process")
+    lock = folder / "local-watchdog.lock"
+    with lock.open("x", encoding="utf-8") as stream:
+        stream.write(str(os.getpid()))
+    state_path = folder / "local-watchdog.json"
+    state = read_json(state_path) or {"notified_codes": [], "log_offset": 0, "started_ts": time.time()}
+    # Existing chat alerts must not be repeated merely because monitoring moved locally.
+    previous = read_json(folder / "monitor-status.json") or {}
+    state["notified_codes"] = sorted(set(state["notified_codes"] + previous.get("notification_keys", [])))
+    log_path = folder / "engine.log"
+    if not state.get("handover_complete"):
+        state["log_offset"] = log_path.stat().st_size if log_path.exists() else 0
+        state["handover_complete"] = True
+    try:
+        while True:
+            now = time.time()
+            status = read_json(folder / "stop-finalization.json") or read_json(folder / "status.json")
+            try:
+                with log_path.open("rb") as stream:
+                    stream.seek(state["log_offset"])
+                    chunk = stream.read()
+                    state["log_offset"] = stream.tell()
+                age = now - log_path.stat().st_mtime
+            except OSError:
+                chunk, age = b"", None
+            codes = classify(status, now, age, process_alive(int(launch["parent_pid"])), chunk.decode("utf-8", errors="replace"))
+            new = sorted(set(codes) - set(state["notified_codes"]))
+            if new:
+                event = {"created_utc": datetime.now(timezone.utc).isoformat(), "codes": new,
+                         "status_checked_ts": status.get("checked_ts") if status else None,
+                         "status_fresh": bool(status and now - status.get("checked_ts", 0) <= 120),
+                         "exchange_queries": 0, "trading_actions": 0}
+                event_path = folder / ("watchdog-event-" + str(time.time_ns()) + ".json")
+                atomic_save(event_path, event)
+                # Durable attempt marker before delivery: restart/timeout cannot flood the chat.
+                state["notified_codes"] = sorted(set(state["notified_codes"] + new))
+                atomic_save(state_path, state)
+                delivery = send_to_chat(codex_exe, thread, event_path, new) if codex_exe and thread else {"attempted": False}
+                event["delivery"] = delivery
+                atomic_save(event_path, event)
+                desktop_alert(new)
+            state.update(checked_utc=datetime.now(timezone.utc).isoformat(), pid=os.getpid(),
+                         active_codes=codes, new_codes=new, credentials_read=False,
+                         exchange_requests=0, trading_actions=0, routine_model_calls=0)
+            atomic_save(state_path, state)
+            if once or (status and status.get("ended_ts")):
+                return
+            time.sleep(interval)
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("trial_folder", type=Path)
+    parser.add_argument("--codex-exe")
+    parser.add_argument("--thread")
+    parser.add_argument("--interval", type=float, default=10)
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
+    if bool(args.codex_exe) != bool(args.thread) or args.interval < 1:
+        parser.error("supply both bridge options, interval>=1")
+    run(args.trial_folder, codex_exe=args.codex_exe, thread=args.thread, interval=args.interval, once=args.once)

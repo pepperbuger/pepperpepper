@@ -1,0 +1,23 @@
+{
+  "scope": "eligibility_only",
+  "source": "https://app.ondoperps.xyz/rewards",
+  "checked_utc": "2026-11-03T12:20:12.079826+00:00",
+  "starts_utc": "2026-11-03T00:00:00+00:00",
+  "ends_utc": "2026-11-10T00:00:00+00:00",
+  "allowed_bases": [
+    "BTC"
+  ],
+  "per_market_usdc": null,
+  "verified_week_label": "Week 2",
+  "verified_total_pool_usdc": "250000",
+  "verified_liquidity_total_usdc": "112500",
+  "verified_eligible_market_count": 20,
+  "current_ui_eligible_markets_link": "https://app.ondoperps.xyz/ko/announcements/usdc-rewards-upgrade",
+  "verified_current_ui_conditions": {
+    "maximum_distance_bps": "25",
+    "near_distance_bps": "5",
+    "near_share": "0.85",
+    "one_sided_qualifies": true
+  },
+  "note": "Current official Week2 UI links to the20-market list containing BTC. Dates follow official Tuesday00UTC week cadence and current countdown. Only BTC trial eligibility is enabled. Per-market allocation and remaining bucket shares are NOT reverified; no5625 assumption and no current-week reward estimate. This file is rejected by model-policy loaders. Not live-order permission."
+}

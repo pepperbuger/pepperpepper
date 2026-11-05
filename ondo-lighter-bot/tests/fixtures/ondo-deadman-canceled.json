@@ -1,0 +1,17 @@
+{
+  "side": "buy",
+  "price": "2.6601",
+  "market": "LIT-USD.P",
+  "size": "1",
+  "filledSize": "0",
+  "lastFillSize": "0",
+  "filledCost": "0",
+  "fee": "0",
+  "status": "canceled",
+  "cancelReason": "cancelaftertimeout",
+  "type": "limit",
+  "timeInForce": "GTC",
+  "postOnly": true,
+  "clientOrderId": "probe_a",
+  "orderId": "fixture_order"
+}

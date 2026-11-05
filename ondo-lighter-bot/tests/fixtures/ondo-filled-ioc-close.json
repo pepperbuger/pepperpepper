@@ -1,0 +1,14 @@
+{
+  "market": "LIT-USD.P",
+  "side": "sell",
+  "size": "4",
+  "filledSize": "4",
+  "filledCost": "12.3788",
+  "fee": "0.003095",
+  "status": "fullyfilled",
+  "type": "limit",
+  "timeInForce": "IOC",
+  "reduceOnly": true,
+  "price": "3.089",
+  "clientOrderId": "fixture_close"
+}

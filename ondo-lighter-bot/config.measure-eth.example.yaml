@@ -1,0 +1,58 @@
+# Prepared ETH24-hour reward measurement, NOT approval to execute. --live requires specific user approval.
+# Target25USD per side (quantity rounded down),4bps offset,50USD inventory stop threshold,2USD equity stop threshold.
+# Stop thresholds are not maximum-loss guarantees. Existing config.yaml/env/data are not replaced.
+# Production DB path retained so old pending/trial safety records cannot be bypassed.
+mode: live
+ondo:
+  rest_url: https://api.ondoperps.xyz
+  ws_url: wss://api.ondoperps.xyz/ws
+  rest_rate_per_sec: 1.0
+  rest_reserved_per_min: 10
+  leverage: 3
+  deadman_timeout_sec: 30
+  deadman_heartbeat_sec: 10
+lighter:
+  base_url: https://mainnet.zklighter.elliot.ai
+  ws_url: wss://mainnet.zklighter.elliot.ai/stream
+  leverage: 3
+quoting:
+  band_bps: 25
+  offset_bps: 4
+  requote_threshold_bps: 1
+  skew_bps_per_1k: 0
+  basis_deviation_bps: 15
+  basis_window_sec: 3600
+  basis_sanity_bps: 100
+  quote_when_underlying_closed: false
+  inventory_mode: flatten
+hedging:
+  max_slippage_bps: 15
+  retries: 1
+  reconcile_interval_sec: 10
+risk:
+  max_unhedged_usd: 15
+  max_unhedged_sec: 20
+  ws_stale_sec: 10
+  max_margin_usage: 0.6
+  daily_loss_limit_usd: 2
+  max_total_inventory_usd: 50
+  positions_stale_sec: 30
+markets:
+- base: ETH
+  size_usd_per_side: 25
+  max_inventory_usd: 50
+rewards:
+  policy_path: docs/rewards-eligibility-eth-2026-11-03.json
+market_data:
+  ondo_rest_url: https://api.ondoperps.xyz
+  ondo_ws_url: wss://api.ondoperps.xyz/ws
+  lighter_rest_url: https://mainnet.zklighter.elliot.ai
+  lighter_ws_url: wss://mainnet.zklighter.elliot.ai/stream?readonly=true
+  ondo_ping_sec: 30
+  lighter_ping_sec: 60
+storage:
+  sqlite_path: data/olbot.sqlite
+  log_path: data/olbot.log
+  quote_snapshot_sec: 30
+  band_depth_sec: 300
+  basis_sample_sec: 10

@@ -1,0 +1,13 @@
+{
+  "status": "canceled-too-much-slippage",
+  "market_index": 120,
+  "is_ask": false,
+  "initial_base_amount": "3.54",
+  "filled_base_amount": "0.00",
+  "remaining_base_amount": "0.00",
+  "type": "market",
+  "time_in_force": "immediate-or-cancel",
+  "reduce_only": false,
+  "client_order_index": 41,
+  "owner_account_index": 7
+}

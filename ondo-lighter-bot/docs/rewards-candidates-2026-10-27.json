@@ -1,0 +1,16 @@
+{
+  "source": "https://app.ondoperps.xyz/announcements/usdc-rewards-upgrade",
+  "checked_utc": "2026-11-01T05:35:48.897165+00:00",
+  "starts_utc": "2026-10-27T00:00:00+00:00",
+  "ends_utc": "2026-11-03T00:00:00+00:00",
+  "allowed_bases": [
+    "META",
+    "TSLA",
+    "NVDA",
+    "XAG",
+    "XAU",
+    "WTI"
+  ],
+  "per_market_usdc": "5000",
+  "note": "Public research only: explicitly approved TradFi candidates; verified current week subset. No live permission; no extension past Nov3."
+}

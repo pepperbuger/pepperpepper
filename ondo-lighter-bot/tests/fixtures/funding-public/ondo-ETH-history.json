@@ -1,0 +1,34 @@
+{
+  "success": true,
+  "result": [
+    {
+      "market": "ETH-USD.P",
+      "time": "2026-10-30T14:00:01.095485505Z",
+      "fundingRate": "-0.0000467"
+    },
+    {
+      "market": "ETH-USD.P",
+      "time": "2026-10-30T13:00:00.008864696Z",
+      "fundingRate": "-0.0000713"
+    },
+    {
+      "market": "ETH-USD.P",
+      "time": "2026-10-30T12:00:00.03424896Z",
+      "fundingRate": "-0.0000819"
+    },
+    {
+      "market": "ETH-USD.P",
+      "time": "2026-10-30T11:00:00.023639866Z",
+      "fundingRate": "-0.0001012"
+    },
+    {
+      "market": "ETH-USD.P",
+      "time": "2026-10-30T10:00:00.068868189Z",
+      "fundingRate": "-0.0000306"
+    }
+  ],
+  "pageInfo": {
+    "prevCursor": "",
+    "nextCursor": ""
+  }
+}
